@@ -1,0 +1,224 @@
+package server
+
+import (
+	"net/http"
+	"time"
+
+	"github.com/aegishjalmur/mcp-firewall/internal/auth"
+	"github.com/aegishjalmur/mcp-firewall/internal/config"
+	"github.com/aegishjalmur/mcp-firewall/internal/crypto"
+	"github.com/aegishjalmur/mcp-firewall/internal/logging"
+	"github.com/aegishjalmur/mcp-firewall/internal/sanitizer"
+	"github.com/gin-gonic/gin"
+)
+
+// MCPFirewall represents the main server instance
+type MCPFirewall struct {
+	config            *config.Config
+	logger            *logging.Logger
+	auth              *auth.Manager
+	sanitizer         *sanitizer.Manager
+	complianceManager *sanitizer.ComplianceManager
+	encryptionManager *crypto.EncryptionManager
+	mcpProxy          *MCPProxy
+	rateLimiter       *RateLimiter
+	router            *gin.Engine
+}
+
+// New creates a new MCP Firewall server instance
+func New(cfg *config.Config) (*MCPFirewall, error) {
+	// Initialize logger
+	logger, err := logging.New(cfg.Logging)
+	if err != nil {
+		return nil, err
+	}
+
+	// Initialize authentication manager
+	authManager, err := auth.New(cfg.Auth, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	// Initialize sanitizer manager
+	sanitizerManager := sanitizer.New(cfg.Security, logger)
+
+	// Initialize compliance manager
+	complianceManager := sanitizer.NewComplianceManager(cfg.Compliance, logger)
+
+	// Initialize encryption manager
+	encryptionManager, err := crypto.NewEncryptionManager(cfg.Security.Encryption, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	// Initialize rate limiter
+	rateLimiter := NewRateLimiter(cfg.Security.RateLimit, logger)
+
+	// Initialize MCP proxy
+	mcpProxy := NewMCPProxy(logger, sanitizerManager, complianceManager)
+
+	// Create server instance
+	server := &MCPFirewall{
+		config:            cfg,
+		logger:            logger,
+		auth:              authManager,
+		sanitizer:         sanitizerManager,
+		complianceManager: complianceManager,
+		encryptionManager: encryptionManager,
+		mcpProxy:          mcpProxy,
+		rateLimiter:       rateLimiter,
+	}
+
+	// Initialize router
+	server.setupRouter()
+
+	return server, nil
+}
+
+// Handler returns the HTTP handler for the server
+func (s *MCPFirewall) Handler() http.Handler {
+	return s.router
+}
+
+// setupRouter configures the Gin router with middleware and routes
+func (s *MCPFirewall) setupRouter() {
+	s.router = gin.New()
+
+	// Security middleware
+	s.router.Use(s.securityHeaders())
+	s.router.Use(s.loggingMiddleware())
+	s.router.Use(gin.Recovery())
+
+	// Rate limiting middleware
+	if s.config.Security.RateLimit.Enabled {
+		s.router.Use(s.rateLimiter.Middleware())
+	}
+
+	// Authentication middleware for protected routes
+	protected := s.router.Group("/")
+	protected.Use(s.auth.AuthMiddleware())
+
+	// Health check endpoint (unprotected)
+	s.router.GET("/health", s.healthCheck)
+
+	// Security API endpoints
+	api := s.router.Group("/api")
+	{
+		security := api.Group("/security")
+		security.Use(s.auth.AuthMiddleware())
+		{
+			security.GET("/logging/status", s.loggingStatus)
+			security.GET("/logging/validate", s.validateLogIntegrity)
+			security.GET("/metrics", s.getMetrics)
+		}
+	}
+
+	// MCP proxy endpoints
+	mcp := protected.Group("/mcp")
+	{
+		mcp.POST("/", s.mcpProxy.HandleMCPRequest)
+		mcp.POST("/resources", s.mcpProxy.HandleMCPRequest)
+		mcp.POST("/tools", s.mcpProxy.HandleMCPRequest)
+		mcp.POST("/prompts", s.mcpProxy.HandleMCPRequest)
+		mcp.GET("/ws", s.mcpProxy.HandleWebSocket)
+	}
+
+	// Authentication endpoints
+	auth := s.router.Group("/auth")
+	{
+		auth.POST("/login", s.auth.Login)
+		auth.POST("/refresh", s.auth.RefreshToken)
+		auth.POST("/logout", s.auth.Logout)
+		if s.config.Auth.OAuth.Enabled {
+			auth.GET("/oauth/callback", s.auth.OAuthCallback)
+			auth.GET("/oauth/login", s.auth.OAuthLogin)
+		}
+	}
+}
+
+// Security headers middleware
+func (s *MCPFirewall) securityHeaders() gin.HandlerFunc {
+	return gin.HandlerFunc(func(c *gin.Context) {
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("X-Frame-Options", "DENY")
+		c.Header("X-XSS-Protection", "1; mode=block")
+		c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		c.Header("Content-Security-Policy", "default-src 'self'")
+		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
+		c.Header("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+		c.Next()
+	})
+}
+
+// Logging middleware
+func (s *MCPFirewall) loggingMiddleware() gin.HandlerFunc {
+	return gin.HandlerFunc(func(c *gin.Context) {
+		start := time.Now()
+		c.Next()
+
+		duration := time.Since(start)
+		s.logger.LogRequest(&logging.RequestLog{
+			ClientIP:     c.ClientIP(),
+			Method:       c.Request.Method,
+			Path:         c.Request.URL.Path,
+			StatusCode:   c.Writer.Status(),
+			Duration:     duration,
+			UserAgent:    c.Request.UserAgent(),
+			Timestamp:    start,
+		})
+	})
+}
+
+
+// Health check handler
+func (s *MCPFirewall) healthCheck(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"status":    "healthy",
+		"timestamp": time.Now().UTC(),
+		"version":   "1.0.0",
+	})
+}
+
+// Logging status handler
+func (s *MCPFirewall) loggingStatus(c *gin.Context) {
+	status := s.logger.GetStatus()
+	c.JSON(http.StatusOK, status)
+}
+
+// Log integrity validation handler
+func (s *MCPFirewall) validateLogIntegrity(c *gin.Context) {
+	result := s.logger.ValidateIntegrity()
+	c.JSON(http.StatusOK, result)
+}
+
+// Metrics handler
+func (s *MCPFirewall) getMetrics(c *gin.Context) {
+	rateLimitStats := s.rateLimiter.GetStats()
+	encryptionStatus := s.encryptionManager.GetKeyRotationStatus()
+	logStatus := s.logger.GetStatus()
+
+	c.JSON(http.StatusOK, gin.H{
+		"connections": gin.H{
+			"active_clients": rateLimitStats.ActiveClients,
+			"total_clients":  rateLimitStats.TotalClients,
+		},
+		"requests": gin.H{
+			"per_second":       rateLimitStats.RequestsPerSec,
+			"blocked_requests": rateLimitStats.BlockedRequests,
+		},
+		"security": gin.H{
+			"current_key_id":    encryptionStatus.CurrentKeyID,
+			"next_key_rotation": encryptionStatus.NextRotation,
+			"active_keys":       encryptionStatus.ActiveKeys,
+		},
+		"logging": gin.H{
+			"total_writes":       logStatus.TotalWrites,
+			"integrity_status":   logStatus.IntegrityStatus,
+			"last_integrity_check": logStatus.LastIntegrityCheck,
+		},
+		"uptime": gin.H{
+			"status": "healthy",
+		},
+	})
+}
+
