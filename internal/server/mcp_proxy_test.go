@@ -2,10 +2,13 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/aegishjalmur/mcp-firewall/internal/config"
 	"github.com/aegishjalmur/mcp-firewall/internal/logging"
@@ -351,4 +354,229 @@ func containsSecurityReplacement(content string) bool {
 		}
 	}
 	return false
+}
+
+// Test the new SSE endpoints in server routing
+func TestServerSSEEndpoints(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	proxy := createTestMCPProxy()
+
+	// Create test router with SSE endpoints
+	router := gin.New()
+	router.GET("/mcp/sse", proxy.HandleSSEEvents)
+	router.POST("/mcp/sse", proxy.HandleSSE)
+
+	// Test GET /mcp/sse endpoint
+	t.Run("SSE Events Endpoint", func(t *testing.T) {
+		req, err := http.NewRequest("GET", "/mcp/sse", nil)
+		if err != nil {
+			t.Fatalf("Failed to create request: %v", err)
+		}
+		req.Header.Set("Accept", "text/event-stream")
+
+		// Add timeout context to prevent hanging
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		req = req.WithContext(ctx)
+
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		// Check SSE headers
+		if w.Header().Get("Content-Type") != "text/event-stream" {
+			t.Errorf("Expected Content-Type: text/event-stream, got: %s", w.Header().Get("Content-Type"))
+		}
+	})
+
+	// Test POST /mcp/sse endpoint
+	t.Run("SSE Request Endpoint", func(t *testing.T) {
+		mcpRequest := MCPRequest{
+			Method: "initialize",
+			Params: map[string]interface{}{
+				"protocolVersion": "2024-11-05",
+			},
+			ID: "sse-test",
+		}
+
+		requestJSON, _ := json.Marshal(mcpRequest)
+		req, err := http.NewRequest("POST", "/mcp/sse", bytes.NewBuffer(requestJSON))
+		if err != nil {
+			t.Fatalf("Failed to create request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "text/event-stream")
+
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		// Check that SSE response is returned
+		body := w.Body.String()
+		if !strings.Contains(body, "event: connection") {
+			t.Error("Expected connection event in SSE response")
+		}
+		if !strings.Contains(body, "event: response") {
+			t.Error("Expected response event in SSE response")
+		}
+	})
+}
+
+// Test WebSocket endpoint (ensure it still works with new additions)
+func TestWebSocketEndpoint(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	proxy := createTestMCPProxy()
+
+	// Create test router
+	router := gin.New()
+	router.GET("/mcp/ws", proxy.HandleWebSocket)
+
+	// Test WebSocket upgrade (this will fail upgrade but we can test the handler is registered)
+	req, err := http.NewRequest("GET", "/mcp/ws", nil)
+	if err != nil {
+		t.Fatalf("Failed to create request: %v", err)
+	}
+
+	// Add WebSocket headers
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Sec-WebSocket-Key", "test-key")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	// The upgrade will fail in test environment, but the handler should be called
+	// We just verify that the endpoint exists and doesn't return 404
+	if w.Code == 404 {
+		t.Error("WebSocket endpoint should be registered and not return 404")
+	}
+}
+
+// Test that all transport endpoints coexist properly
+func TestTransportEndpointsCoexistence(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	proxy := createTestMCPProxy()
+
+	// Create test router with all endpoints
+	router := gin.New()
+
+	// Add all MCP endpoints
+	mcp := router.Group("/mcp")
+	{
+		mcp.POST("/", proxy.HandleMCPRequest)
+		mcp.POST("/resources", proxy.HandleMCPRequest)
+		mcp.POST("/tools", proxy.HandleMCPRequest)
+		mcp.POST("/prompts", proxy.HandleMCPRequest)
+		mcp.GET("/ws", proxy.HandleWebSocket)
+		mcp.POST("/sse", proxy.HandleSSE)
+		mcp.GET("/sse", proxy.HandleSSEEvents)
+	}
+
+	// Test that all endpoints are registered and don't conflict
+	endpoints := []struct {
+		method string
+		path   string
+		expectOK bool
+	}{
+		{"POST", "/mcp/", true},
+		{"POST", "/mcp/resources", true},
+		{"POST", "/mcp/tools", true},
+		{"POST", "/mcp/prompts", true},
+		{"GET", "/mcp/ws", false}, // Will fail upgrade but endpoint exists
+		{"POST", "/mcp/sse", true},
+		{"GET", "/mcp/sse", true},
+	}
+
+	for _, endpoint := range endpoints {
+		t.Run(endpoint.method+" "+endpoint.path, func(t *testing.T) {
+			var req *http.Request
+			var err error
+
+			if endpoint.method == "POST" {
+				testRequest := MCPRequest{
+					Method: "initialize",
+					Params: map[string]interface{}{
+						"protocolVersion": "2024-11-05",
+					},
+					ID: "test",
+				}
+				requestJSON, _ := json.Marshal(testRequest)
+				req, err = http.NewRequest(endpoint.method, endpoint.path, bytes.NewBuffer(requestJSON))
+				if err != nil {
+					t.Fatalf("Failed to create request: %v", err)
+				}
+				req.Header.Set("Content-Type", "application/json")
+			} else {
+				req, err = http.NewRequest(endpoint.method, endpoint.path, nil)
+				if err != nil {
+					t.Fatalf("Failed to create request: %v", err)
+				}
+			}
+
+			if strings.Contains(endpoint.path, "sse") {
+				req.Header.Set("Accept", "text/event-stream")
+			}
+			if strings.Contains(endpoint.path, "ws") {
+				req.Header.Set("Connection", "Upgrade")
+				req.Header.Set("Upgrade", "websocket")
+				req.Header.Set("Sec-WebSocket-Key", "test-key")
+				req.Header.Set("Sec-WebSocket-Version", "13")
+			}
+
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+
+			// Check that endpoint exists (not 404)
+			if w.Code == 404 {
+				t.Errorf("Endpoint %s %s should exist", endpoint.method, endpoint.path)
+			}
+
+			// For SSE endpoints, check Content-Type
+			if strings.Contains(endpoint.path, "sse") && endpoint.expectOK {
+				if w.Header().Get("Content-Type") != "text/event-stream" {
+					t.Errorf("SSE endpoint should set text/event-stream content type")
+				}
+			}
+		})
+	}
+}
+
+// Benchmark test for transport performance comparison
+func BenchmarkTransportPerformance(b *testing.B) {
+	gin.SetMode(gin.TestMode)
+	proxy := createTestMCPProxy()
+
+	// Create test router
+	router := gin.New()
+	router.POST("/mcp/", proxy.HandleMCPRequest)
+	router.POST("/mcp/sse", proxy.HandleSSE)
+
+	testRequest := MCPRequest{
+		Method: "initialize",
+		Params: map[string]interface{}{
+			"protocolVersion": "2024-11-05",
+		},
+		ID: "bench",
+	}
+	requestJSON, _ := json.Marshal(testRequest)
+
+	b.Run("HTTP Transport", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			req, _ := http.NewRequest("POST", "/mcp/", bytes.NewBuffer(requestJSON))
+			req.Header.Set("Content-Type", "application/json")
+
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+		}
+	})
+
+	b.Run("SSE Transport", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			req, _ := http.NewRequest("POST", "/mcp/sse", bytes.NewBuffer(requestJSON))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Accept", "text/event-stream")
+
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+		}
+	})
 }

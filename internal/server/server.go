@@ -9,6 +9,7 @@ import (
 	"github.com/aegishjalmur/mcp-firewall/internal/crypto"
 	"github.com/aegishjalmur/mcp-firewall/internal/logging"
 	"github.com/aegishjalmur/mcp-firewall/internal/sanitizer"
+	"github.com/aegishjalmur/mcp-firewall/internal/upstream"
 	"github.com/gin-gonic/gin"
 )
 
@@ -20,6 +21,7 @@ type MCPFirewall struct {
 	sanitizer         *sanitizer.Manager
 	complianceManager *sanitizer.ComplianceManager
 	encryptionManager *crypto.EncryptionManager
+	upstreamManager   *upstream.Manager
 	mcpProxy          *MCPProxy
 	rateLimiter       *RateLimiter
 	router            *gin.Engine
@@ -54,8 +56,11 @@ func New(cfg *config.Config) (*MCPFirewall, error) {
 	// Initialize rate limiter
 	rateLimiter := NewRateLimiter(cfg.Security.RateLimit, logger)
 
+	// Initialize upstream manager
+	upstreamManager := upstream.NewManager(&cfg.Upstream, logger)
+
 	// Initialize MCP proxy
-	mcpProxy := NewMCPProxy(logger, sanitizerManager, complianceManager)
+	mcpProxy := NewMCPProxy(logger, sanitizerManager, complianceManager, upstreamManager)
 
 	// Create server instance
 	server := &MCPFirewall{
@@ -65,6 +70,7 @@ func New(cfg *config.Config) (*MCPFirewall, error) {
 		sanitizer:         sanitizerManager,
 		complianceManager: complianceManager,
 		encryptionManager: encryptionManager,
+		upstreamManager:   upstreamManager,
 		mcpProxy:          mcpProxy,
 		rateLimiter:       rateLimiter,
 	}
@@ -121,6 +127,9 @@ func (s *MCPFirewall) setupRouter() {
 		mcp.POST("/tools", s.mcpProxy.HandleMCPRequest)
 		mcp.POST("/prompts", s.mcpProxy.HandleMCPRequest)
 		mcp.GET("/ws", s.mcpProxy.HandleWebSocket)
+		mcp.POST("/sse", s.mcpProxy.HandleSSE)
+		mcp.GET("/sse", s.mcpProxy.HandleSSEEvents)
+		mcp.GET("/status", s.mcpProxy.HandleServiceStatus)
 	}
 
 	// Authentication endpoints
@@ -220,5 +229,20 @@ func (s *MCPFirewall) getMetrics(c *gin.Context) {
 			"status": "healthy",
 		},
 	})
+}
+
+// GetLogger returns the logger instance for use in other components
+func (s *MCPFirewall) GetLogger() *logging.Logger {
+	return s.logger
+}
+
+// GetSanitizer returns the sanitizer manager for use in other components
+func (s *MCPFirewall) GetSanitizer() *sanitizer.Manager {
+	return s.sanitizer
+}
+
+// GetComplianceManager returns the compliance manager for use in other components
+func (s *MCPFirewall) GetComplianceManager() *sanitizer.ComplianceManager {
+	return s.complianceManager
 }
 

@@ -105,12 +105,18 @@ The MCP Security Firewall is a comprehensive security gateway for Model Context 
   - ✅ `prompts/list` - Prompt listing
   - ✅ `prompts/get` - Prompt retrieval
 
+- **Transport Support**
+  - ✅ **HTTP/HTTPS** - RESTful API endpoints with TLS 1.3
+  - ✅ **WebSocket** - Persistent connections with security filtering
+  - ✅ **Server-Sent Events (SSE)** - Bidirectional event streams
+  - ✅ **STDIO** - Command-line JSON-RPC over stdin/stdout
+
 - **Security Integration**
-  - ✅ Real-time content sanitization
+  - ✅ Real-time content sanitization across all transports
   - ✅ Compliance scanning on all requests
   - ✅ URI validation (blocks file://, javascript:, etc.)
   - ✅ Response sanitization
-  - ✅ WebSocket support with security filtering
+  - ✅ Unified security filtering for all transport modes
 
 - **Built-in Security Tools**
   - ✅ `security_scan` tool for content analysis
@@ -229,8 +235,15 @@ make run
 - **API Key**: Generated on startup (check logs)
 - **Server**: https://localhost:8443
 
-### Basic Usage
+### Transport Mode Usage
+
+#### HTTP/HTTPS Mode (Default)
 ```bash
+# Start HTTP server with all endpoints (including SSE)
+make run
+# or
+./bin/mcp-firewall -transport http
+
 # Health check
 curl -k https://localhost:8443/health
 
@@ -239,15 +252,52 @@ curl -k -X POST https://localhost:8443/auth/login \
   -H "Content-Type: application/json" \
   -d '{"username":"admin","password":"admin123"}'
 
-# Use API key for authentication
-curl -k -H "X-API-Key: <api-key>" \
-  https://localhost:8443/api/security/metrics
-
-# MCP initialize request
+# MCP initialize via HTTP
 curl -k -H "Authorization: Bearer <jwt-token>" \
   -X POST https://localhost:8443/mcp \
   -H "Content-Type: application/json" \
   -d '{"method":"initialize","params":{"protocolVersion":"2024-11-05"},"id":"1"}'
+
+# WebSocket connection
+curl -k --include \
+  --no-buffer \
+  --header "Connection: Upgrade" \
+  --header "Upgrade: websocket" \
+  --header "Sec-WebSocket-Key: SGVsbG8sIHdvcmxkIQ==" \
+  --header "Sec-WebSocket-Version: 13" \
+  https://localhost:8443/mcp/ws
+```
+
+#### Server-Sent Events (SSE) Mode
+```bash
+# Start server with SSE endpoints
+./bin/mcp-firewall -transport sse
+
+# Connect to SSE stream
+curl -k -H "Authorization: Bearer <jwt-token>" \
+  -H "Accept: text/event-stream" \
+  https://localhost:8443/mcp/sse
+
+# Send MCP request via SSE
+curl -k -H "Authorization: Bearer <jwt-token>" \
+  -X POST https://localhost:8443/mcp/sse \
+  -H "Content-Type: application/json" \
+  -d '{"method":"tools/list","params":{},"id":"1"}'
+```
+
+#### STDIO Mode
+```bash
+# Start in STDIO mode
+make run-stdio
+# or
+./bin/mcp-firewall -transport stdio
+
+# Send MCP requests via stdin/stdout
+echo '{"method":"initialize","params":{"protocolVersion":"2024-11-05"},"id":"1"}' | \
+  ./bin/mcp-firewall -transport stdio
+
+echo '{"method":"tools/list","params":{},"id":"2"}' | \
+  ./bin/mcp-firewall -transport stdio
 ```
 
 ## 📈 Performance & Scale

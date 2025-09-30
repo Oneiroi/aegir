@@ -10,6 +10,7 @@ import (
 
 	"github.com/aegishjalmur/mcp-firewall/internal/logging"
 	"github.com/aegishjalmur/mcp-firewall/internal/sanitizer"
+	"github.com/aegishjalmur/mcp-firewall/internal/upstream"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 )
@@ -19,7 +20,7 @@ type MCPProxy struct {
 	logger            *logging.Logger
 	sanitizer         *sanitizer.Manager
 	complianceManager *sanitizer.ComplianceManager
-	upstreamURL       string
+	upstreamManager   *upstream.Manager
 	upgrader          websocket.Upgrader
 }
 
@@ -45,12 +46,12 @@ type MCPError struct {
 }
 
 // NewMCPProxy creates a new MCP proxy instance
-func NewMCPProxy(logger *logging.Logger, sanitizerMgr *sanitizer.Manager, complianceMgr *sanitizer.ComplianceManager) *MCPProxy {
+func NewMCPProxy(logger *logging.Logger, sanitizerMgr *sanitizer.Manager, complianceMgr *sanitizer.ComplianceManager, upstreamMgr *upstream.Manager) *MCPProxy {
 	return &MCPProxy{
 		logger:            logger,
 		sanitizer:         sanitizerMgr,
 		complianceManager: complianceMgr,
-		upstreamURL:       "", // Will be configured per request or from config
+		upstreamManager:   upstreamMgr,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				// In production, implement proper origin checking
@@ -166,8 +167,33 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 		req.Params = sanitizedParams
 	}
 
-	// Process the MCP request based on method
-	response := p.processMCPMethod(c.Request.Context(), &req)
+	// Forward the sanitized request to upstream services
+	upstreamReq := &upstream.MCPRequest{
+		Method: req.Method,
+		Params: req.Params,
+		ID:     req.ID,
+	}
+
+	upstreamResp, err := p.upstreamManager.ForwardRequest(c.Request.Context(), upstreamReq)
+	if err != nil {
+		p.logger.Error("Failed to forward request to upstream", "error", err)
+		c.JSON(http.StatusBadGateway, MCPResponse{
+			Error: &MCPError{
+				Code:    -32002,
+				Message: "Upstream service unavailable",
+				Data:    err.Error(),
+			},
+			ID: req.ID,
+		})
+		return
+	}
+
+	// Convert upstream response to our response format
+	response := &MCPResponse{
+		Result: upstreamResp.Result,
+		Error:  (*MCPError)(upstreamResp.Error),
+		ID:     upstreamResp.ID,
+	}
 
 	// Sanitize response before returning
 	responseJSON, _ := json.Marshal(response.Result)
@@ -181,6 +207,15 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, response)
+}
+
+// HandleServiceStatus returns the status of upstream services
+func (p *MCPProxy) HandleServiceStatus(c *gin.Context) {
+	status := p.upstreamManager.GetServiceStatus()
+	c.JSON(http.StatusOK, gin.H{
+		"upstream_services": status,
+		"timestamp":         time.Now().UTC(),
+	})
 }
 
 // processMCPMethod handles different MCP method types
@@ -561,6 +596,105 @@ func (p *MCPProxy) HandleWebSocket(c *gin.Context) {
 	}
 
 	p.logger.Info("WebSocket connection closed", "remote_addr", conn.RemoteAddr())
+}
+
+// HandleSSE handles Server-Sent Events connections for MCP
+func (p *MCPProxy) HandleSSE(c *gin.Context) {
+	// Set SSE headers
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("Access-Control-Allow-Origin", "*")
+	c.Header("Access-Control-Allow-Headers", "Cache-Control")
+
+	// Get the response writer
+	w := c.Writer
+
+	p.logger.Info("SSE connection established", "remote_addr", c.ClientIP())
+
+	// Send initial connection event
+	fmt.Fprintf(w, "event: connection\n")
+	fmt.Fprintf(w, "data: {\"type\":\"connection\",\"status\":\"established\"}\n\n")
+	w.Flush()
+
+	// Handle incoming POST data for requests
+	if c.Request.Method == "POST" {
+		var mcpRequest MCPRequest
+		if err := c.ShouldBindJSON(&mcpRequest); err != nil {
+			p.logger.Error("SSE request parsing failed", "error", err)
+			fmt.Fprintf(w, "event: error\n")
+			fmt.Fprintf(w, "data: {\"error\":\"Invalid JSON request\"}\n\n")
+			w.Flush()
+			return
+		}
+
+		// Process the request through security filters
+		requestJSON, _ := json.Marshal(mcpRequest)
+		sanitized := p.sanitizer.SanitizeContent(string(requestJSON))
+
+		if sanitized.Blocked {
+			errorResponse := MCPResponse{
+				Error: &MCPError{
+					Code:    -32000,
+					Message: "Request blocked by security policy",
+				},
+				ID: mcpRequest.ID,
+			}
+			responseJSON, _ := json.Marshal(errorResponse)
+			fmt.Fprintf(w, "event: response\n")
+			fmt.Fprintf(w, "data: %s\n\n", responseJSON)
+			w.Flush()
+			return
+		}
+
+		// Process the MCP request
+		response := p.processMCPMethod(c.Request.Context(), &mcpRequest)
+		responseJSON, _ := json.Marshal(response)
+
+		// Send response as SSE event
+		fmt.Fprintf(w, "event: response\n")
+		fmt.Fprintf(w, "data: %s\n\n", responseJSON)
+		w.Flush()
+	}
+
+	p.logger.Info("SSE connection closed", "remote_addr", c.ClientIP())
+}
+
+// HandleSSEEvents handles bidirectional SSE communication
+func (p *MCPProxy) HandleSSEEvents(c *gin.Context) {
+	// Set SSE headers
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("Access-Control-Allow-Origin", "*")
+	c.Header("Access-Control-Allow-Headers", "Cache-Control")
+
+	w := c.Writer
+	ctx := c.Request.Context()
+
+	p.logger.Info("SSE event stream established", "remote_addr", c.ClientIP())
+
+	// Send initial connection event
+	fmt.Fprintf(w, "event: connection\n")
+	fmt.Fprintf(w, "data: {\"type\":\"connection\",\"status\":\"established\"}\n\n")
+	w.Flush()
+
+	// Keep connection alive and handle context cancellation
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			p.logger.Info("SSE connection context cancelled", "remote_addr", c.ClientIP())
+			return
+		case <-ticker.C:
+			// Send keep-alive ping
+			fmt.Fprintf(w, "event: ping\n")
+			fmt.Fprintf(w, "data: {\"type\":\"ping\",\"timestamp\":\"%s\"}\n\n", time.Now().Format(time.RFC3339))
+			w.Flush()
+		}
+	}
 }
 
 // validateResourceURI validates resource URIs for security

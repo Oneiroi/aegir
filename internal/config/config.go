@@ -15,6 +15,7 @@ type Config struct {
 	Logging     Logging    `json:"logging"`
 	Security    Security   `json:"security"`
 	Compliance  Compliance `json:"compliance"`
+	Upstream    Upstream   `json:"upstream"`
 }
 
 // Server configuration
@@ -103,11 +104,12 @@ type RateLimit struct {
 
 // Sanitization configuration
 type Sanitization struct {
-	Enabled          bool `json:"enabled"`
-	XSSPrevention    bool `json:"xss_prevention"`
-	SQLInjection     bool `json:"sql_injection"`
-	HomoglyphFilter  bool `json:"homoglyph_filter"`
-	FormulaDetection bool `json:"formula_detection"`
+	Enabled           bool `json:"enabled"`
+	XSSPrevention     bool `json:"xss_prevention"`
+	SQLInjection      bool `json:"sql_injection"`
+	HomoglyphFilter   bool `json:"homoglyph_filter"`
+	FormulaDetection  bool `json:"formula_detection"`
+	PromptInjection   bool `json:"prompt_injection"`
 }
 
 // Encryption configuration
@@ -177,6 +179,83 @@ type SOC2Config struct {
 	Type2   bool `json:"type2"`
 }
 
+// Upstream configuration for MCP service discovery and proxying
+type Upstream struct {
+	Services         []UpstreamService `json:"services"`
+	Discovery        Discovery         `json:"discovery"`
+	LoadBalancing    LoadBalancing     `json:"load_balancing"`
+	HealthCheck      HealthCheck       `json:"health_check"`
+	CircuitBreaker   CircuitBreaker    `json:"circuit_breaker"`
+	Retry            RetryConfig       `json:"retry"`
+}
+
+// UpstreamService represents a backend MCP service
+type UpstreamService struct {
+	Name        string            `json:"name"`
+	URL         string            `json:"url"`
+	Transport   string            `json:"transport"` // http, stdio, sse
+	Weight      int               `json:"weight"`
+	Priority    int               `json:"priority"`
+	Tags        []string          `json:"tags"`
+	Metadata    map[string]string `json:"metadata"`
+	Enabled     bool              `json:"enabled"`
+	TLS         UpstreamTLS       `json:"tls"`
+	Timeout     int               `json:"timeout_seconds"`
+}
+
+// UpstreamTLS configuration for upstream connections
+type UpstreamTLS struct {
+	Enabled            bool   `json:"enabled"`
+	SkipVerify         bool   `json:"skip_verify"`
+	ClientCertFile     string `json:"client_cert_file"`
+	ClientKeyFile      string `json:"client_key_file"`
+	CACertFile         string `json:"ca_cert_file"`
+	ServerName         string `json:"server_name"`
+}
+
+// Discovery configuration for service discovery
+type Discovery struct {
+	Enabled   bool   `json:"enabled"`
+	Provider  string `json:"provider"`  // consul, dns, static, kubernetes
+	Endpoint  string `json:"endpoint"`
+	Namespace string `json:"namespace"`
+	Interval  int    `json:"interval_seconds"`
+}
+
+// LoadBalancing configuration
+type LoadBalancing struct {
+	Strategy    string `json:"strategy"`     // round_robin, weighted, least_connections, random
+	StickyKey   string `json:"sticky_key"`  // header or cookie name for sticky sessions
+	HashKey     string `json:"hash_key"`    // for consistent hashing
+}
+
+// HealthCheck configuration
+type HealthCheck struct {
+	Enabled         bool   `json:"enabled"`
+	Interval        int    `json:"interval_seconds"`
+	Timeout         int    `json:"timeout_seconds"`
+	HealthyThreshold   int    `json:"healthy_threshold"`
+	UnhealthyThreshold int    `json:"unhealthy_threshold"`
+	Path            string `json:"path"`
+	ExpectedCodes   []int  `json:"expected_codes"`
+}
+
+// CircuitBreaker configuration
+type CircuitBreaker struct {
+	Enabled           bool  `json:"enabled"`
+	FailureThreshold  int   `json:"failure_threshold"`
+	RecoveryTimeout   int   `json:"recovery_timeout_seconds"`
+	HalfOpenRequests  int   `json:"half_open_requests"`
+}
+
+// RetryConfig for upstream request retries
+type RetryConfig struct {
+	Enabled     bool  `json:"enabled"`
+	MaxRetries  int   `json:"max_retries"`
+	BackoffMs   int   `json:"backoff_ms"`
+	MaxBackoffMs int   `json:"max_backoff_ms"`
+}
+
 // Load loads configuration from environment variables and defaults
 func Load() (*Config, error) {
 	cfg := &Config{
@@ -240,6 +319,7 @@ func Load() (*Config, error) {
 				SQLInjection:     getEnvAsBool("SQL_INJECTION_PREVENTION", true),
 				HomoglyphFilter:  getEnvAsBool("HOMOGLYPH_FILTER", true),
 				FormulaDetection: getEnvAsBool("FORMULA_DETECTION", true),
+				PromptInjection:  getEnvAsBool("PROMPT_INJECTION_PREVENTION", true),
 			},
 			Encryption: Encryption{
 				Algorithm:   getEnv("ENCRYPTION_ALGORITHM", "AES-256-GCM"),
@@ -284,6 +364,52 @@ func Load() (*Config, error) {
 			SOC2: SOC2Config{
 				Enabled: getEnvAsBool("SOC2_ENABLED", false),
 				Type2:   getEnvAsBool("SOC2_TYPE2", false),
+			},
+		},
+		Upstream: Upstream{
+			Services: []UpstreamService{
+				{
+					Name:      getEnv("UPSTREAM_SERVICE_NAME", "default-mcp-service"),
+					URL:       getEnv("UPSTREAM_SERVICE_URL", "http://localhost:8080"),
+					Transport: getEnv("UPSTREAM_TRANSPORT", "http"),
+					Weight:    getEnvAsInt("UPSTREAM_WEIGHT", 100),
+					Priority:  getEnvAsInt("UPSTREAM_PRIORITY", 1),
+					Enabled:   getEnvAsBool("UPSTREAM_ENABLED", true),
+					Timeout:   getEnvAsInt("UPSTREAM_TIMEOUT", 30),
+					TLS: UpstreamTLS{
+						Enabled:    getEnvAsBool("UPSTREAM_TLS_ENABLED", false),
+						SkipVerify: getEnvAsBool("UPSTREAM_TLS_SKIP_VERIFY", false),
+					},
+				},
+			},
+			Discovery: Discovery{
+				Enabled:  getEnvAsBool("DISCOVERY_ENABLED", false),
+				Provider: getEnv("DISCOVERY_PROVIDER", "static"),
+				Interval: getEnvAsInt("DISCOVERY_INTERVAL", 30),
+			},
+			LoadBalancing: LoadBalancing{
+				Strategy: getEnv("LOAD_BALANCING_STRATEGY", "round_robin"),
+			},
+			HealthCheck: HealthCheck{
+				Enabled:            getEnvAsBool("HEALTH_CHECK_ENABLED", true),
+				Interval:           getEnvAsInt("HEALTH_CHECK_INTERVAL", 30),
+				Timeout:            getEnvAsInt("HEALTH_CHECK_TIMEOUT", 5),
+				HealthyThreshold:   getEnvAsInt("HEALTH_CHECK_HEALTHY_THRESHOLD", 2),
+				UnhealthyThreshold: getEnvAsInt("HEALTH_CHECK_UNHEALTHY_THRESHOLD", 3),
+				Path:               getEnv("HEALTH_CHECK_PATH", "/health"),
+				ExpectedCodes:      []int{200, 204},
+			},
+			CircuitBreaker: CircuitBreaker{
+				Enabled:          getEnvAsBool("CIRCUIT_BREAKER_ENABLED", true),
+				FailureThreshold: getEnvAsInt("CIRCUIT_BREAKER_FAILURE_THRESHOLD", 5),
+				RecoveryTimeout:  getEnvAsInt("CIRCUIT_BREAKER_RECOVERY_TIMEOUT", 60),
+				HalfOpenRequests: getEnvAsInt("CIRCUIT_BREAKER_HALF_OPEN_REQUESTS", 3),
+			},
+			Retry: RetryConfig{
+				Enabled:      getEnvAsBool("RETRY_ENABLED", true),
+				MaxRetries:   getEnvAsInt("RETRY_MAX_RETRIES", 3),
+				BackoffMs:    getEnvAsInt("RETRY_BACKOFF_MS", 100),
+				MaxBackoffMs: getEnvAsInt("RETRY_MAX_BACKOFF_MS", 1000),
 			},
 		},
 	}

@@ -1,16 +1,28 @@
-.PHONY: build run test clean dev lint
+.PHONY: build run run-stdio run-sse test clean dev dev-stdio lint certs
 
 # Build the application
 build:
 	go build -o bin/mcp-firewall ./cmd/server
 
-# Run the application
-run: build
+# Run the application (default: HTTP mode)
+run: build certs
 	./bin/mcp-firewall
 
+# Run in STDIO mode
+run-stdio: build
+	./bin/mcp-firewall -transport stdio
+
+# Run in SSE mode (same as HTTP with SSE endpoints)
+run-sse: build certs
+	./bin/mcp-firewall -transport sse
+
 # Run in development mode with hot reload
-dev:
+dev: certs
 	go run ./cmd/server
+
+# Run in development mode with STDIO transport
+dev-stdio:
+	go run ./cmd/server -transport stdio
 
 # Run tests
 test:
