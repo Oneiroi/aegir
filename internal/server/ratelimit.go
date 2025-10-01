@@ -49,11 +49,17 @@ type ClientStats struct {
 
 // NewRateLimiter creates a new rate limiter instance
 func NewRateLimiter(config config.RateLimit, logger *logging.Logger) *RateLimiter {
+	// Ensure minimum cleanup interval to prevent panic
+	cleanupInterval := config.CleanupInterval
+	if cleanupInterval <= 0 {
+		cleanupInterval = 300 // 5 minutes default
+	}
+
 	rl := &RateLimiter{
 		config:        config,
 		logger:        logger,
 		clients:       make(map[string]*ClientLimiter),
-		cleanupTicker: time.NewTicker(time.Duration(config.CleanupInterval) * time.Second),
+		cleanupTicker: time.NewTicker(time.Duration(cleanupInterval) * time.Second),
 	}
 
 	// Start cleanup goroutine

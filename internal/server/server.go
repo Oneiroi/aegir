@@ -7,6 +7,7 @@ import (
 	"github.com/aegishjalmur/mcp-firewall/internal/auth"
 	"github.com/aegishjalmur/mcp-firewall/internal/config"
 	"github.com/aegishjalmur/mcp-firewall/internal/crypto"
+	"github.com/aegishjalmur/mcp-firewall/internal/dashboard"
 	"github.com/aegishjalmur/mcp-firewall/internal/logging"
 	"github.com/aegishjalmur/mcp-firewall/internal/sanitizer"
 	"github.com/aegishjalmur/mcp-firewall/internal/upstream"
@@ -24,6 +25,8 @@ type MCPFirewall struct {
 	upstreamManager   *upstream.Manager
 	mcpProxy          *MCPProxy
 	rateLimiter       *RateLimiter
+	dashboardStats    *dashboard.StatsCollector
+	dashboardAPI      *dashboard.DashboardAPI
 	router            *gin.Engine
 }
 
@@ -53,14 +56,21 @@ func New(cfg *config.Config) (*MCPFirewall, error) {
 		return nil, err
 	}
 
-	// Initialize rate limiter
-	rateLimiter := NewRateLimiter(cfg.Security.RateLimit, logger)
+	// Initialize rate limiter (only if enabled)
+	var rateLimiter *RateLimiter
+	if cfg.Security.RateLimit.Enabled {
+		rateLimiter = NewRateLimiter(cfg.Security.RateLimit, logger)
+	}
 
 	// Initialize upstream manager
 	upstreamManager := upstream.NewManager(&cfg.Upstream, logger)
 
 	// Initialize MCP proxy
 	mcpProxy := NewMCPProxy(logger, sanitizerManager, complianceManager, upstreamManager)
+
+	// Initialize dashboard statistics collector
+	dashboardStats := dashboard.NewStatsCollector(logger)
+	dashboardAPI := dashboard.NewDashboardAPI(dashboardStats)
 
 	// Create server instance
 	server := &MCPFirewall{
@@ -73,6 +83,8 @@ func New(cfg *config.Config) (*MCPFirewall, error) {
 		upstreamManager:   upstreamManager,
 		mcpProxy:          mcpProxy,
 		rateLimiter:       rateLimiter,
+		dashboardStats:    dashboardStats,
+		dashboardAPI:      dashboardAPI,
 	}
 
 	// Initialize router
@@ -94,6 +106,9 @@ func (s *MCPFirewall) setupRouter() {
 	s.router.Use(s.securityHeaders())
 	s.router.Use(s.loggingMiddleware())
 	s.router.Use(gin.Recovery())
+
+	// Dashboard statistics middleware (should be early to capture all requests)
+	s.router.Use(s.dashboardStats.Middleware())
 
 	// Rate limiting middleware
 	if s.config.Security.RateLimit.Enabled {
@@ -117,7 +132,15 @@ func (s *MCPFirewall) setupRouter() {
 			security.GET("/logging/validate", s.validateLogIntegrity)
 			security.GET("/metrics", s.getMetrics)
 		}
+
+		// Dashboard API endpoints (protected)
+		s.dashboardAPI.RegisterRoutes(api)
 	}
+
+	// Dashboard web interface (protected)
+	webDashboard := s.router.Group("/")
+	webDashboard.Use(s.auth.AuthMiddleware())
+	s.dashboardAPI.RegisterWebRoutes(webDashboard)
 
 	// MCP proxy endpoints
 	mcp := protected.Group("/mcp")
@@ -202,7 +225,13 @@ func (s *MCPFirewall) validateLogIntegrity(c *gin.Context) {
 
 // Metrics handler
 func (s *MCPFirewall) getMetrics(c *gin.Context) {
-	rateLimitStats := s.rateLimiter.GetStats()
+	var rateLimitStats *RateLimitStats
+	if s.rateLimiter != nil {
+		rateLimitStats = s.rateLimiter.GetStats()
+	} else {
+		rateLimitStats = &RateLimitStats{}
+	}
+
 	encryptionStatus := s.encryptionManager.GetKeyRotationStatus()
 	logStatus := s.logger.GetStatus()
 
