@@ -14,6 +14,11 @@ server:
 auth:
   jwt:
     secret: "simple-dev-key-change-for-production"
+    issuer: "aegir"
+    expiration_time: 3600       # 1 hour in seconds
+    refresh_expiration: 86400   # 24 hours in seconds
+  api_keys:
+    enabled: true
 
 logging:
   level: info
