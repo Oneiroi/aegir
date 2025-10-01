@@ -25,6 +25,7 @@ The MCP Security Firewall is a comprehensive security gateway for Model Context 
   - ✅ SQL injection prevention
   - ✅ Homoglyph attack detection
   - ✅ Spreadsheet formula sanitization
+  - ✅ **Prompt injection prevention** with 20+ attack patterns
 
 ### 🛡️ Threat Protection
 
@@ -389,19 +390,33 @@ Search paths: `.`, `./config`, `/etc/mcp-firewall`, `$HOME/.mcp-firewall`
 - **PCI DSS**: Minimize cardholder data scope
 - **SOC 2**: Regular audits and controls testing
 
-## 🎯 Future Enhancements
+## 🎯 Recent Major Updates
 
-### Pending Items (2 remaining)
-1. **RBAC Authorization Framework** - Granular role-based permissions
-2. **Certificate Management** - Automated certificate renewal
+### ✅ **MCP Specification Compliance (2025-06-18)**
+- **Full MCP Protocol Compliance** - All methods, capabilities, and message formats
+- **True Proxy Architecture** - Forwards requests to upstream MCP services with security
+- **Enhanced Security Tools** - `security_scan` and `compliance_check` with JSON Schema
+- **Advanced Prompts** - Security analysis, compliance review, and threat assessment
+- **Pagination Support** - Cursor-based pagination for all list methods
+- **Capability Negotiation** - Proper MCP capability declaration and merging
+
+### ✅ **Configuration File Support**
+- **Multi-Format Support** - YAML, JSON, TOML configuration files
+- **Configuration Precedence** - Flags > Environment > Files > Defaults
+- **Comprehensive Examples** - Development, production, and testing configurations
+- **Flexible Search Paths** - Multiple configuration directory support
+
+### 🔧 **Future Enhancements**
 
 ### Potential Extensions
-- Machine learning-based anomaly detection
-- Advanced threat intelligence integration
-- Custom rule engine for specialized compliance
-- Real-time dashboard and alerting
-- Multi-tenant support
-- API gateway integration
+- **RBAC Authorization Framework** - Granular role-based permissions
+- **Certificate Management** - Automated certificate renewal
+- **Machine learning-based anomaly detection**
+- **Advanced threat intelligence integration**
+- **Custom rule engine for specialized compliance**
+- **Real-time dashboard and alerting**
+- **Multi-tenant support**
+- **API gateway integration**
 
 ## 📋 Compliance Certifications
 
@@ -413,6 +428,8 @@ Search paths: `.`, `./config`, `/etc/mcp-firewall`, `$HOME/.mcp-firewall`
 ---
 
 **Status**: Production Ready 🚀
+**MCP Compliance**: Fully Compliant (2025-06-18) ✅
 **Security Level**: Enterprise Grade 🔒
 **Compliance**: Multi-Framework ✅
+**Configuration**: File + Environment Support 📁
 **Test Coverage**: 95%+ 🧪

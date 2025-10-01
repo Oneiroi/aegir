@@ -258,13 +258,13 @@ Set up monitoring for:
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details.
+BSL License - see [LICENSE](LICENSE) file for details.
 
 ## Support
 
 For issues and questions:
-- GitHub Issues: [https://github.com/aegishjalmur/mcp-firewall/issues](https://github.com/aegishjalmur/mcp-firewall/issues)
-- Security Issues: security@example.com
+- GitHub Issues: [https://github.com/oneiroi/mcp-firewall/issues](https://github.com/oneiroi/mcp-firewall/issues)
+- Security Issues: security@oneiroi.co.uk
 
 ## Compliance Certifications
 
