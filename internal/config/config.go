@@ -12,13 +12,14 @@ import (
 
 // Config holds all configuration for the MCP Firewall
 type Config struct {
-	Environment string     `json:"environment" mapstructure:"environment"`
-	Server      Server     `json:"server" mapstructure:"server"`
-	Auth        Auth       `json:"auth" mapstructure:"auth"`
-	Logging     Logging    `json:"logging" mapstructure:"logging"`
-	Security    Security   `json:"security" mapstructure:"security"`
-	Compliance  Compliance `json:"compliance" mapstructure:"compliance"`
-	Upstream    Upstream   `json:"upstream" mapstructure:"upstream"`
+	Environment     string          `json:"environment" mapstructure:"environment"`
+	Server          Server          `json:"server" mapstructure:"server"`
+	Auth            Auth            `json:"auth" mapstructure:"auth"`
+	Logging         Logging         `json:"logging" mapstructure:"logging"`
+	Security        Security        `json:"security" mapstructure:"security"`
+	Compliance      Compliance      `json:"compliance" mapstructure:"compliance"`
+	SessionAnalysis SessionAnalysis `json:"session_analysis" mapstructure:"session_analysis"`
+	Upstream        Upstream        `json:"upstream" mapstructure:"upstream"`
 }
 
 // Server configuration
@@ -182,6 +183,18 @@ type SOC2Config struct {
 	Type2   bool `json:"type2"`
 }
 
+// SessionAnalysis configuration for conversational threat detection
+type SessionAnalysis struct {
+	Enabled              bool          `json:"enabled" mapstructure:"enabled"`
+	MaxSessionAge        time.Duration `json:"max_session_age" mapstructure:"max_session_age"`
+	MaxHistorySize       int           `json:"max_history_size" mapstructure:"max_history_size"`
+	ThreatThreshold      float64       `json:"threat_threshold" mapstructure:"threat_threshold"`
+	CleanupInterval      time.Duration `json:"cleanup_interval" mapstructure:"cleanup_interval"`
+	JailbreakThreshold   float64       `json:"jailbreak_threshold" mapstructure:"jailbreak_threshold"`
+	RoleEscalationLimit  int           `json:"role_escalation_limit" mapstructure:"role_escalation_limit"`
+	EmotionalManipThreshold float64    `json:"emotional_manip_threshold" mapstructure:"emotional_manip_threshold"`
+}
+
 // Upstream configuration for MCP service discovery and proxying
 type Upstream struct {
 	Services         []UpstreamService `json:"services"`
@@ -329,6 +342,56 @@ func LoadWithConfigFile(configFile string) (*Config, error) {
 	return &cfg, nil
 }
 
+// LoadWithConfigDir loads configuration with a specific config directory
+func LoadWithConfigDir(configDir string) (*Config, error) {
+	// Initialize viper
+	v := viper.New()
+
+	// Set up configuration directory search
+	v.SetConfigName("mcp-firewall")
+	v.SetConfigType("yaml") // Default type
+	v.AddConfigPath(configDir)
+
+	// Support multiple file formats in the directory
+	v.SetConfigType("yaml")
+	if _, err := os.Stat(configDir + "/mcp-firewall.json"); err == nil {
+		v.SetConfigType("json")
+	}
+	if _, err := os.Stat(configDir + "/mcp-firewall.toml"); err == nil {
+		v.SetConfigType("toml")
+	}
+
+	// Enable environment variable support
+	v.AutomaticEnv()
+	v.SetEnvPrefix("MCP") // MCP_SERVER_PORT, etc.
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+
+	// Set default values first
+	setDefaults(v)
+
+	// Try to read config file (this will merge with defaults)
+	if err := v.ReadInConfig(); err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+			// Config file was found but another error was produced
+			return nil, fmt.Errorf("error reading config file: %w", err)
+		}
+		// Config file not found; ignore error and use defaults + env vars
+	}
+
+	// Unmarshal into config struct
+	var cfg Config
+	if err := v.Unmarshal(&cfg); err != nil {
+		return nil, fmt.Errorf("error unmarshaling config: %w", err)
+	}
+
+	// Validate configuration
+	if err := validateConfig(&cfg); err != nil {
+		return nil, fmt.Errorf("configuration validation failed: %w", err)
+	}
+
+	return &cfg, nil
+}
+
 // setDefaults sets default configuration values
 func setDefaults(v *viper.Viper) {
 	// Environment
@@ -399,6 +462,16 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("compliance.pci.enabled", false)
 	v.SetDefault("compliance.gdpr.enabled", false)
 	v.SetDefault("compliance.soc2.enabled", false)
+
+	// Session Analysis defaults
+	v.SetDefault("session_analysis.enabled", true)
+	v.SetDefault("session_analysis.max_session_age", "30m")
+	v.SetDefault("session_analysis.max_history_size", 50)
+	v.SetDefault("session_analysis.threat_threshold", 0.5)
+	v.SetDefault("session_analysis.cleanup_interval", "5m")
+	v.SetDefault("session_analysis.jailbreak_threshold", 0.6)
+	v.SetDefault("session_analysis.role_escalation_limit", 3)
+	v.SetDefault("session_analysis.emotional_manip_threshold", 0.4)
 
 	// Upstream defaults
 	v.SetDefault("upstream.services", []map[string]interface{}{
@@ -589,6 +662,16 @@ func LoadLegacy() (*Config, error) {
 				Type2:   getEnvAsBool("SOC2_TYPE2", false),
 			},
 		},
+		SessionAnalysis: SessionAnalysis{
+			Enabled:                 getEnvAsBool("SESSION_ANALYSIS_ENABLED", true),
+			MaxSessionAge:           time.Duration(getEnvAsInt("SESSION_MAX_AGE_MINUTES", 30)) * time.Minute,
+			MaxHistorySize:          getEnvAsInt("SESSION_MAX_HISTORY_SIZE", 50),
+			ThreatThreshold:         getEnvAsFloat("SESSION_THREAT_THRESHOLD", 0.5),
+			CleanupInterval:         time.Duration(getEnvAsInt("SESSION_CLEANUP_MINUTES", 5)) * time.Minute,
+			JailbreakThreshold:      getEnvAsFloat("SESSION_JAILBREAK_THRESHOLD", 0.6),
+			RoleEscalationLimit:     getEnvAsInt("SESSION_ROLE_ESCALATION_LIMIT", 3),
+			EmotionalManipThreshold: getEnvAsFloat("SESSION_EMOTIONAL_MANIP_THRESHOLD", 0.4),
+		},
 		Upstream: Upstream{
 			Services: []UpstreamService{
 				{
@@ -661,6 +744,15 @@ func getEnvAsBool(key string, fallback bool) bool {
 	if value := os.Getenv(key); value != "" {
 		if boolVal, err := strconv.ParseBool(value); err == nil {
 			return boolVal
+		}
+	}
+	return fallback
+}
+
+func getEnvAsFloat(key string, fallback float64) float64 {
+	if value := os.Getenv(key); value != "" {
+		if floatVal, err := strconv.ParseFloat(value, 64); err == nil {
+			return floatVal
 		}
 	}
 	return fallback

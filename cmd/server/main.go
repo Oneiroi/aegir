@@ -21,17 +21,77 @@ import (
 func main() {
 	// Parse command-line flags
 	var transport = flag.String("transport", "http", "Transport mode: http, stdio, or sse")
-	flag.Parse()
+	var configFile = flag.String("config", "", "Configuration file path (YAML, JSON, or TOML)")
+	var configDir = flag.String("config-dir", "", "Configuration directory to search for config files")
+	var envFile = flag.String("env", ".env", "Environment file path")
+	var showVersion = flag.Bool("version", false, "Show version information")
+	var showConfig = flag.Bool("show-config", false, "Show current configuration and exit")
 
-	// Load environment variables
-	if err := godotenv.Load(); err != nil {
-		log.Println("Warning: .env file not found")
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "MCP Security Firewall - Enterprise-grade security proxy for Model Context Protocol\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: %s [options]\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Options:\n")
+		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\nConfiguration:\n")
+		fmt.Fprintf(os.Stderr, "  The server loads configuration from multiple sources in this order:\n")
+		fmt.Fprintf(os.Stderr, "  1. Command line flags (highest priority)\n")
+		fmt.Fprintf(os.Stderr, "  2. Environment variables\n")
+		fmt.Fprintf(os.Stderr, "  3. Configuration files (YAML, JSON, TOML)\n")
+		fmt.Fprintf(os.Stderr, "  4. Default values (lowest priority)\n\n")
+		fmt.Fprintf(os.Stderr, "  Default config file search paths:\n")
+		fmt.Fprintf(os.Stderr, "  - ./mcp-firewall.yaml\n")
+		fmt.Fprintf(os.Stderr, "  - ./config/mcp-firewall.yaml\n")
+		fmt.Fprintf(os.Stderr, "  - /etc/mcp-firewall/mcp-firewall.yaml\n")
+		fmt.Fprintf(os.Stderr, "  - $HOME/.mcp-firewall/mcp-firewall.yaml\n\n")
+		fmt.Fprintf(os.Stderr, "Examples:\n")
+		fmt.Fprintf(os.Stderr, "  %s --transport http\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s --config /path/to/config.yaml\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s --config-dir /etc/mcp-firewall\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s --show-config\n", os.Args[0])
 	}
 
-	// Load configuration
-	cfg, err := config.Load()
-	if err != nil {
-		log.Fatalf("Failed to load configuration: %v", err)
+	flag.Parse()
+
+	// Show version if requested
+	if *showVersion {
+		fmt.Printf("MCP Security Firewall v1.0.0\n")
+		fmt.Printf("Enterprise-grade security proxy for Model Context Protocol\n")
+		fmt.Printf("Build: %s\n", getBuildInfo())
+		os.Exit(0)
+	}
+
+	// Load environment variables
+	if err := godotenv.Load(*envFile); err != nil {
+		log.Printf("Warning: Environment file %s not found", *envFile)
+	}
+
+	// Load configuration with file support
+	var cfg *config.Config
+	var err error
+
+	if *configFile != "" {
+		cfg, err = config.LoadWithConfigFile(*configFile)
+		if err != nil {
+			log.Fatalf("Failed to load configuration from %s: %v", *configFile, err)
+		}
+		log.Printf("Loaded configuration from: %s", *configFile)
+	} else if *configDir != "" {
+		cfg, err = config.LoadWithConfigDir(*configDir)
+		if err != nil {
+			log.Fatalf("Failed to load configuration from directory %s: %v", *configDir, err)
+		}
+		log.Printf("Loaded configuration from directory: %s", *configDir)
+	} else {
+		cfg, err = config.Load()
+		if err != nil {
+			log.Fatalf("Failed to load configuration: %v", err)
+		}
+	}
+
+	// Show configuration if requested
+	if *showConfig {
+		showCurrentConfig(cfg)
+		os.Exit(0)
 	}
 
 	// Handle different transport modes
@@ -143,5 +203,48 @@ func createTLSConfig(cfg *config.Config) *tls.Config {
 			tls.CurveP384,
 			tls.CurveP256,
 		},
+	}
+}
+
+func getBuildInfo() string {
+	return "development"
+}
+
+func showCurrentConfig(cfg *config.Config) {
+	fmt.Printf("=== MCP Firewall Configuration ===\n\n")
+	fmt.Printf("Environment: %s\n", cfg.Environment)
+	fmt.Printf("Server Port: %d\n", cfg.Server.Port)
+	fmt.Printf("TLS Enabled: %v\n", cfg.Server.TLS.Enabled)
+
+	if cfg.Server.TLS.Enabled {
+		fmt.Printf("TLS Cert File: %s\n", cfg.Server.TLS.CertFile)
+		fmt.Printf("TLS Key File: %s\n", cfg.Server.TLS.KeyFile)
+	}
+
+	fmt.Printf("\nSecurity Settings:\n")
+	fmt.Printf("  Rate Limiting: %v\n", cfg.Security.RateLimit.Enabled)
+	if cfg.Security.RateLimit.Enabled {
+		fmt.Printf("    Requests per minute: %d\n", cfg.Security.RateLimit.RequestsPerMin)
+	}
+
+	fmt.Printf("  Sanitization: %v\n", cfg.Security.Sanitization.Enabled)
+	fmt.Printf("  XSS Prevention: %v\n", cfg.Security.Sanitization.XSSPrevention)
+	fmt.Printf("  SQL Injection Prevention: %v\n", cfg.Security.Sanitization.SQLInjection)
+
+	fmt.Printf("\nCompliance:\n")
+	fmt.Printf("  GDPR: %v\n", cfg.Compliance.GDPR.Enabled)
+	fmt.Printf("  HIPAA: %v\n", cfg.Compliance.HIPAA.Enabled)
+	fmt.Printf("  PCI: %v\n", cfg.Compliance.PCI.Enabled)
+
+	fmt.Printf("\nLogging:\n")
+	fmt.Printf("  Level: %s\n", cfg.Logging.Level)
+	fmt.Printf("  Format: %s\n", cfg.Logging.Format)
+	fmt.Printf("  Integrity Checks: %v\n", cfg.Logging.IntegrityChecks)
+
+	fmt.Printf("\nSession Analysis:\n")
+	fmt.Printf("  Multi-turn Attack Detection: %v\n", cfg.SessionAnalysis.Enabled)
+	if cfg.SessionAnalysis.Enabled {
+		fmt.Printf("    Max Session Age: %v\n", cfg.SessionAnalysis.MaxSessionAge)
+		fmt.Printf("    Threat Threshold: %.2f\n", cfg.SessionAnalysis.ThreatThreshold)
 	}
 }

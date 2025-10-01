@@ -37,6 +37,15 @@ The MCP Security Firewall is a comprehensive security gateway for Model Context 
   - ✅ Password pattern detection
   - ✅ Custom pattern support
 
+- **Conversational State Attack Protection** 🆕
+  - ✅ **Session-Aware Threat Analysis** - Multi-turn attack detection framework
+  - ✅ **Progressive Threat Scoring** - Risk accumulation across conversation history
+  - ✅ **Jailbreak Pattern Detection** - DAN, grandmother exploit, context poisoning
+  - ✅ **Role Escalation Prevention** - Authority claim validation and limits
+  - ✅ **Emotional Manipulation Detection** - Social engineering pattern recognition
+  - ✅ **Template Injection Prevention** - Distributed code injection detection
+  - ⚠️ **Integration Status**: Designed and tested, configuration ready, integration in progress
+
 - **Rate Limiting**
   - ✅ Per-client IP rate limiting
   - ✅ Burst protection with token bucket
@@ -162,6 +171,7 @@ mcp-firewall/
 │   ├── logging/         # Secure logging with HMAC
 │   ├── sanitizer/       # Content sanitization and compliance
 │   ├── server/          # HTTP server and MCP proxy
+│   ├── session/         🆕 # Conversational threat analysis and session management
 │   └── upstream/        # Upstream service management and proxy
 ├── certs/               # TLS certificates
 ├── logs/                # Log files
@@ -218,6 +228,12 @@ mcp-firewall/
    - Circuit breaker patterns
    - Request forwarding and retry logic
 
+9. **Session Analyzer** 🆕 (`internal/session/analyzer.go`)
+   - Conversational threat analysis
+   - Multi-turn attack pattern detection
+   - Progressive threat scoring
+   - Session state management and cleanup
+
 ## 🧪 Testing
 
 - ✅ **95% Test Coverage** across core components
@@ -233,6 +249,7 @@ mcp-firewall/
 - Authentication tests
 - Encryption tests
 - Rate limiting tests
+- **Session analysis tests** 🆕 - Multi-turn attack detection scenarios
 
 ## 🚀 Quick Start
 
@@ -361,10 +378,17 @@ Search paths: `.`, `./config`, `/etc/mcp-firewall`, `$HOME/.mcp-firewall`
 ### Configuration Categories
 - **Security**: Rate limits, encryption settings, detection thresholds
 - **Compliance**: Enable/disable specific frameworks (GDPR, HIPAA, PCI)
+- **Session Analysis** 🆕: Multi-turn attack detection, threat thresholds, session limits
 - **Logging**: Log levels, integrity checks, retention
 - **TLS**: Certificate paths, protocol versions
 - **Authentication**: JWT secrets, OAuth settings
 - **Upstream Services**: Service discovery, load balancing, health checking
+
+### CLI Configuration Support
+- ✅ `--config /path/to/config.yaml` - Specify configuration file
+- ✅ `--config-dir /etc/mcp-firewall` - Specify configuration directory
+- ✅ `--show-config` - Display current configuration and exit
+- ✅ `--help` - Enhanced help with configuration examples
 
 ### Security Defaults
 - TLS 1.3 minimum
@@ -403,8 +427,17 @@ Search paths: `.`, `./config`, `/etc/mcp-firewall`, `$HOME/.mcp-firewall`
 ### ✅ **Configuration File Support**
 - **Multi-Format Support** - YAML, JSON, TOML configuration files
 - **Configuration Precedence** - Flags > Environment > Files > Defaults
-- **Comprehensive Examples** - Development, production, and testing configurations
+- **CLI Configuration Options** - `--config`, `--config-dir`, `--show-config` flags
+- **Enhanced Help Output** - Comprehensive usage examples and search paths
+- **Session Analysis Configuration** - Threat thresholds, session limits, cleanup intervals
 - **Flexible Search Paths** - Multiple configuration directory support
+
+### ✅ **Enhanced Security Coverage** 🆕
+- **Conversational State Attack Protection** - Multi-turn attack detection framework
+- **Session-Aware Analysis** - Progressive threat scoring across conversation history
+- **Advanced Pattern Detection** - Jailbreak, role escalation, emotional manipulation
+- **Comprehensive Test Suite** - 7 attack scenarios with real-world examples
+- **Configuration Integration** - Session analysis settings in config files
 
 ### 🔧 **Future Enhancements**
 
