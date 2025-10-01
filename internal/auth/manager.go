@@ -235,11 +235,17 @@ func (m *Manager) Login(c *gin.Context) {
 
 	m.logger.Info("Successful login", "username", user.Username, "ip", c.ClientIP())
 
+	// Calculate expires_in with fallback to default
+	expiresIn := int(m.config.JWT.ExpirationTime.Seconds())
+	if expiresIn == 0 {
+		expiresIn = 3600 // Default to 1 hour if config is invalid
+	}
+
 	c.JSON(http.StatusOK, LoginResponse{
 		AccessToken:  accessToken,
 		RefreshToken: refreshToken,
 		TokenType:    "Bearer",
-		ExpiresIn:    int(m.config.JWT.ExpirationTime.Seconds()),
+		ExpiresIn:    expiresIn,
 	})
 }
 
@@ -278,6 +284,12 @@ func (m *Manager) OAuthCallback(c *gin.Context) {
 
 // generateJWT generates a new JWT token for a user
 func (m *Manager) generateJWT(user *User) (string, error) {
+	// Use fallback duration if config is invalid
+	expirationTime := m.config.JWT.ExpirationTime
+	if expirationTime == 0 {
+		expirationTime = time.Hour // Default to 1 hour
+	}
+
 	claims := Claims{
 		UserID:   user.ID,
 		Username: user.Username,
@@ -287,7 +299,7 @@ func (m *Manager) generateJWT(user *User) (string, error) {
 			Issuer:    m.config.JWT.Issuer,
 			Subject:   user.ID,
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(m.config.JWT.ExpirationTime)),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(expirationTime)),
 			ID:        uuid.New().String(),
 		},
 	}

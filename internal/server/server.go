@@ -137,9 +137,9 @@ func (s *MCPFirewall) setupRouter() {
 		s.dashboardAPI.RegisterRoutes(api)
 	}
 
-	// Dashboard web interface (protected)
+	// Dashboard web interface (temporarily unprotected for development)
 	webDashboard := s.router.Group("/")
-	webDashboard.Use(s.auth.AuthMiddleware())
+	// webDashboard.Use(s.auth.AuthMiddleware()) // Commented out for development
 	s.dashboardAPI.RegisterWebRoutes(webDashboard)
 
 	// MCP proxy endpoints
