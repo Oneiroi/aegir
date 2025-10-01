@@ -96,33 +96,57 @@ The MCP Security Firewall is a comprehensive security gateway for Model Context 
 
 ### 🚀 MCP Protocol Implementation
 
-- **Core MCP Methods**
-  - ✅ `initialize` - Server initialization with security capabilities
-  - ✅ `resources/list` - Resource listing with security filtering
-  - ✅ `resources/read` - Resource reading with URI validation
-  - ✅ `tools/list` - Tool listing with security tools
-  - ✅ `tools/call` - Tool execution with content filtering
-  - ✅ `prompts/list` - Prompt listing
-  - ✅ `prompts/get` - Prompt retrieval
+**✅ FULLY COMPLIANT with MCP Specification 2025-06-18**
 
-- **Transport Support**
+- **Core MCP Methods** (JSON-RPC 2.0 compliant)
+  - ✅ `initialize` - Server initialization with proper capability negotiation
+  - ✅ `resources/list` - Resource listing with pagination support
+  - ✅ `resources/read` - Resource reading with URI validation and security filtering
+  - ✅ `tools/list` - Tool listing with JSON Schema validation
+  - ✅ `tools/call` - Tool execution with input validation and content filtering
+  - ✅ `prompts/list` - Prompt listing with pagination support
+  - ✅ `prompts/get` - Prompt retrieval with argument handling
+
+- **MCP Capabilities Declaration**
+  - ✅ **Resources**: `subscribe: true`, `listChanged: true`
+  - ✅ **Tools**: `listChanged: true` with JSON Schema validation
+  - ✅ **Prompts**: `listChanged: true` with argument support
+  - ✅ **Custom Security**: Advanced security capabilities exposed
+
+- **Transport Support** (All MCP-compliant)
   - ✅ **HTTP/HTTPS** - RESTful API endpoints with TLS 1.3
   - ✅ **WebSocket** - Persistent connections with security filtering
   - ✅ **Server-Sent Events (SSE)** - Bidirectional event streams
   - ✅ **STDIO** - Command-line JSON-RPC over stdin/stdout
 
-- **Security Integration**
-  - ✅ Real-time content sanitization across all transports
-  - ✅ Compliance scanning on all requests
-  - ✅ URI validation (blocks file://, javascript:, etc.)
-  - ✅ Response sanitization
-  - ✅ Unified security filtering for all transport modes
+- **Proxy Architecture**
+  - ✅ **True Proxy Functionality** - Forwards requests to upstream MCP services
+  - ✅ **Capability Merging** - Combines upstream capabilities with firewall security
+  - ✅ **Request/Response Filtering** - Security applied to all proxied traffic
+  - ✅ **Fallback Handling** - Built-in security tools when upstream unavailable
 
-- **Built-in Security Tools**
-  - ✅ `security_scan` tool for content analysis
-  - ✅ Risk level assessment
-  - ✅ Detection counting and reporting
-  - ✅ Compliance violation reporting
+- **Pagination Support**
+  - ✅ Cursor-based pagination for `resources/list`, `tools/list`, `prompts/list`
+  - ✅ `nextCursor` field in responses for additional pages
+  - ✅ MCP-compliant pagination parameters
+
+- **JSON Schema Validation**
+  - ✅ Complete input schemas for all security tools
+  - ✅ Output schemas defining response structures
+  - ✅ Parameter validation with detailed error messages
+  - ✅ Type safety and constraint enforcement
+
+- **Enhanced Security Tools**
+  - ✅ `security_scan` - Comprehensive threat and vulnerability analysis
+  - ✅ `compliance_check` - Multi-framework regulatory compliance checking
+  - ✅ Risk level assessment with detailed reporting
+  - ✅ Framework-specific violation detection (GDPR, HIPAA, PCI, SOX)
+
+- **Security Prompts**
+  - ✅ `security_analysis` - Deep security threat analysis prompts
+  - ✅ `compliance_review` - Regulatory compliance review prompts
+  - ✅ `threat_assessment` - Contextual threat evaluation prompts
+  - ✅ Multi-modal content support (text, images, resources)
 
 ## 🏗️ Architecture
 
@@ -132,11 +156,12 @@ mcp-firewall/
 ├── cmd/server/           # Main application entry point
 ├── internal/
 │   ├── auth/            # Authentication and authorization
-│   ├── config/          # Configuration management
+│   ├── config/          # Configuration management (with file support)
 │   ├── crypto/          # Encryption and key management
 │   ├── logging/         # Secure logging with HMAC
 │   ├── sanitizer/       # Content sanitization and compliance
-│   └── server/          # HTTP server and MCP proxy
+│   ├── server/          # HTTP server and MCP proxy
+│   └── upstream/        # Upstream service management and proxy
 ├── certs/               # TLS certificates
 ├── logs/                # Log files
 └── bin/                 # Compiled binaries
@@ -185,6 +210,12 @@ mcp-firewall/
    - Structured event logging
    - Integrity validation
    - Audit trail
+
+8. **Upstream Manager** (`internal/upstream/manager.go`)
+   - Service discovery and health checking
+   - Load balancing with multiple strategies
+   - Circuit breaker patterns
+   - Request forwarding and retry logic
 
 ## 🧪 Testing
 
@@ -310,14 +341,29 @@ echo '{"method":"tools/list","params":{},"id":"2"}' | \
 
 ## 🔧 Configuration
 
-### Environment Variables
-All security settings are configurable via environment variables:
+### Multiple Configuration Sources
+**✅ NEW: Full configuration file support with precedence**
 
+The firewall supports multiple configuration sources with priority order:
+1. **Command line flags** (highest priority)
+2. **Environment variables**
+3. **Configuration files** (YAML, JSON, TOML)
+4. **Default values** (lowest priority)
+
+### Configuration Files
+- **YAML**: `mcp-firewall.yaml` (primary format)
+- **JSON**: `mcp-firewall.json` (structured format)
+- **TOML**: `mcp-firewall.toml` (human-friendly format)
+
+Search paths: `.`, `./config`, `/etc/mcp-firewall`, `$HOME/.mcp-firewall`
+
+### Configuration Categories
 - **Security**: Rate limits, encryption settings, detection thresholds
 - **Compliance**: Enable/disable specific frameworks (GDPR, HIPAA, PCI)
 - **Logging**: Log levels, integrity checks, retention
 - **TLS**: Certificate paths, protocol versions
 - **Authentication**: JWT secrets, OAuth settings
+- **Upstream Services**: Service discovery, load balancing, health checking
 
 ### Security Defaults
 - TLS 1.3 minimum

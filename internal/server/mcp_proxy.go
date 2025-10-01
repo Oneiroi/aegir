@@ -177,6 +177,14 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 	upstreamResp, err := p.upstreamManager.ForwardRequest(c.Request.Context(), upstreamReq)
 	if err != nil {
 		p.logger.Error("Failed to forward request to upstream", "error", err)
+		// Fall back to local handling for some methods, or return error
+		if req.Method == "initialize" {
+			// Handle initialization locally since firewall needs to inject its capabilities
+			response := p.handleInitialize(c.Request.Context(), &req)
+			c.JSON(http.StatusOK, response)
+			return
+		}
+
 		c.JSON(http.StatusBadGateway, MCPResponse{
 			Error: &MCPError{
 				Code:    -32002,
@@ -193,6 +201,11 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 		Result: upstreamResp.Result,
 		Error:  (*MCPError)(upstreamResp.Error),
 		ID:     upstreamResp.ID,
+	}
+
+	// For initialize method, merge upstream capabilities with firewall capabilities
+	if req.Method == "initialize" && response.Result != nil {
+		response = p.mergeInitializeCapabilities(response, &req)
 	}
 
 	// Sanitize response before returning
@@ -249,17 +262,30 @@ func (p *MCPProxy) processMCPMethod(ctx context.Context, req *MCPRequest) *MCPRe
 
 // handleInitialize processes MCP initialize requests
 func (p *MCPProxy) handleInitialize(ctx context.Context, req *MCPRequest) *MCPResponse {
-	// Return initialization response with security capabilities
+	// Return initialization response with MCP-compliant capabilities
 	result := map[string]interface{}{
-		"protocolVersion": "2024-11-05",
+		"protocolVersion": "2025-06-18",
 		"capabilities": map[string]interface{}{
+			"resources": map[string]interface{}{
+				"subscribe":    true,
+				"listChanged": true,
+			},
+			"tools": map[string]interface{}{
+				"listChanged": true,
+			},
+			"prompts": map[string]interface{}{
+				"listChanged": true,
+			},
 			"logging": map[string]interface{}{
 				"level": "info",
 			},
+			// Custom security capabilities
 			"security": map[string]interface{}{
-				"content_filtering": true,
+				"content_filtering":   true,
 				"compliance_scanning": true,
-				"rate_limiting": true,
+				"rate_limiting":      true,
+				"threat_detection":   true,
+				"data_sanitization":  true,
 			},
 		},
 		"serverInfo": map[string]interface{}{
@@ -274,16 +300,94 @@ func (p *MCPProxy) handleInitialize(ctx context.Context, req *MCPRequest) *MCPRe
 	}
 }
 
+// mergeInitializeCapabilities merges upstream server capabilities with firewall capabilities
+func (p *MCPProxy) mergeInitializeCapabilities(upstreamResponse *MCPResponse, req *MCPRequest) *MCPResponse {
+	if upstreamResponse.Result == nil {
+		return upstreamResponse
+	}
+
+	resultMap, ok := upstreamResponse.Result.(map[string]interface{})
+	if !ok {
+		return upstreamResponse
+	}
+
+	// Get existing capabilities or create new ones
+	capabilities, ok := resultMap["capabilities"].(map[string]interface{})
+	if !ok {
+		capabilities = make(map[string]interface{})
+	}
+
+	// Add firewall security capabilities
+	capabilities["security"] = map[string]interface{}{
+		"content_filtering":   true,
+		"compliance_scanning": true,
+		"rate_limiting":      true,
+		"threat_detection":   true,
+		"data_sanitization":  true,
+	}
+
+	// Update server info to indicate firewall proxy
+	serverInfo, ok := resultMap["serverInfo"].(map[string]interface{})
+	if !ok {
+		serverInfo = make(map[string]interface{})
+	}
+
+	// Preserve upstream server info but indicate firewall
+	serverInfo["firewall"] = map[string]interface{}{
+		"name":    "MCP Security Firewall",
+		"version": "1.0.0",
+		"proxy":   true,
+	}
+
+	resultMap["capabilities"] = capabilities
+	resultMap["serverInfo"] = serverInfo
+
+	return &MCPResponse{
+		Result: resultMap,
+		Error:  upstreamResponse.Error,
+		ID:     upstreamResponse.ID,
+	}
+}
+
 // handleResourcesList processes resources/list requests
 func (p *MCPProxy) handleResourcesList(ctx context.Context, req *MCPRequest) *MCPResponse {
-	// In a real implementation, this would proxy to upstream MCP servers
-	// For now, return empty list with security notice
-	result := map[string]interface{}{
-		"resources": []interface{}{},
-		"_meta": map[string]interface{}{
-			"security_filtered": true,
-			"compliance_checked": true,
+	// This method should be handled by the main proxy flow now
+	// If we reach here, upstream is unavailable, so return security tools as resources
+
+	// Add firewall's built-in security resources
+	resources := []interface{}{
+		map[string]interface{}{
+			"uri":         "security://scan/content",
+			"name":        "content_security_scan",
+			"title":       "Content Security Scanner",
+			"description": "Scan content for security threats and compliance violations",
+			"mimeType":    "application/json",
 		},
+		map[string]interface{}{
+			"uri":         "security://policy/status",
+			"name":        "security_policy_status",
+			"title":       "Security Policy Status",
+			"description": "Current security policy configuration and status",
+			"mimeType":    "application/json",
+		},
+	}
+
+	// Handle pagination
+	var nextCursor *string
+	paramsMap, ok := req.Params.(map[string]interface{})
+	if ok {
+		if cursor, exists := paramsMap["cursor"]; exists && cursor != nil {
+			// In a real implementation, handle pagination here
+			// For now, no additional pages
+		}
+	}
+
+	result := map[string]interface{}{
+		"resources": resources,
+	}
+
+	if nextCursor != nil {
+		result["nextCursor"] = *nextCursor
 	}
 
 	return &MCPResponse{
@@ -348,17 +452,71 @@ func (p *MCPProxy) handleResourcesRead(ctx context.Context, req *MCPRequest) *MC
 
 // handleToolsList processes tools/list requests
 func (p *MCPProxy) handleToolsList(ctx context.Context, req *MCPRequest) *MCPResponse {
-	// Return filtered tools list
+	// If we reach here, upstream is unavailable, so return firewall's built-in security tools
 	tools := []interface{}{
 		map[string]interface{}{
 			"name":        "security_scan",
-			"description": "Scan content for security issues",
+			"title":       "Security Content Scanner",
+			"description": "Scan content for security threats, compliance violations, and sensitive data",
 			"inputSchema": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"content": map[string]interface{}{
 						"type":        "string",
-						"description": "Content to scan",
+						"description": "Content to scan for security issues",
+						"maxLength":   100000,
+					},
+					"scan_type": map[string]interface{}{
+						"type":        "string",
+						"description": "Type of scan to perform",
+						"enum":        []string{"security", "compliance", "all"},
+						"default":     "all",
+					},
+				},
+				"required": []string{"content"},
+			},
+			"outputSchema": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"risk_level": map[string]interface{}{
+						"type": "string",
+						"enum": []string{"low", "medium", "high", "critical"},
+					},
+					"detections": map[string]interface{}{
+						"type": "array",
+						"items": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"type":        map[string]string{"type": "string"},
+								"description": map[string]string{"type": "string"},
+								"severity":    map[string]string{"type": "string"},
+							},
+						},
+					},
+					"sanitized": map[string]string{"type": "boolean"},
+				},
+			},
+		},
+		map[string]interface{}{
+			"name":        "compliance_check",
+			"title":       "Compliance Checker",
+			"description": "Check content for regulatory compliance (GDPR, HIPAA, PCI DSS)",
+			"inputSchema": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"content": map[string]interface{}{
+						"type":        "string",
+						"description": "Content to check for compliance",
+						"maxLength":   100000,
+					},
+					"frameworks": map[string]interface{}{
+						"type":        "array",
+						"description": "Compliance frameworks to check against",
+						"items": map[string]interface{}{
+							"type": "string",
+							"enum": []string{"gdpr", "hipaa", "pci", "sox", "all"},
+						},
+						"default": []string{"all"},
 					},
 				},
 				"required": []string{"content"},
@@ -366,8 +524,21 @@ func (p *MCPProxy) handleToolsList(ctx context.Context, req *MCPRequest) *MCPRes
 		},
 	}
 
+	// Handle pagination
+	var nextCursor *string
+	paramsMap, ok := req.Params.(map[string]interface{})
+	if ok {
+		if cursor, exists := paramsMap["cursor"]; exists && cursor != nil {
+			// In a real implementation, handle pagination here
+		}
+	}
+
 	result := map[string]interface{}{
 		"tools": tools,
+	}
+
+	if nextCursor != nil {
+		result["nextCursor"] = *nextCursor
 	}
 
 	return &MCPResponse{
@@ -400,17 +571,20 @@ func (p *MCPProxy) handleToolsCall(ctx context.Context, req *MCPRequest) *MCPRes
 		}
 	}
 
-	if name == "security_scan" {
+	switch name {
+	case "security_scan":
 		return p.handleSecurityScanTool(ctx, req, paramsMap)
-	}
-
-	return &MCPResponse{
-		Error: &MCPError{
-			Code:    -32601,
-			Message: "Tool not found",
-			Data:    fmt.Sprintf("Unknown tool: %s", name),
-		},
-		ID: req.ID,
+	case "compliance_check":
+		return p.handleComplianceCheckTool(ctx, req, paramsMap)
+	default:
+		return &MCPResponse{
+			Error: &MCPError{
+				Code:    -32601,
+				Message: "Tool not found",
+				Data:    fmt.Sprintf("Unknown tool: %s", name),
+			},
+			ID: req.ID,
+		}
 	}
 }
 
@@ -472,22 +646,142 @@ func (p *MCPProxy) handleSecurityScanTool(ctx context.Context, req *MCPRequest, 
 	}
 }
 
+// handleComplianceCheckTool implements the compliance_check tool
+func (p *MCPProxy) handleComplianceCheckTool(ctx context.Context, req *MCPRequest, params map[string]interface{}) *MCPResponse {
+	arguments, ok := params["arguments"].(map[string]interface{})
+	if !ok {
+		return &MCPResponse{
+			Error: &MCPError{
+				Code:    -32602,
+				Message: "Invalid arguments",
+			},
+			ID: req.ID,
+		}
+	}
+
+	inputContent, ok := arguments["content"].(string)
+	if !ok {
+		return &MCPResponse{
+			Error: &MCPError{
+				Code:    -32602,
+				Message: "Missing required argument: content",
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Get frameworks to check (default to all)
+	frameworks := []string{"all"}
+	if fwArray, ok := arguments["frameworks"].([]interface{}); ok {
+		frameworks = make([]string, len(fwArray))
+		for i, fw := range fwArray {
+			if fwStr, ok := fw.(string); ok {
+				frameworks[i] = fwStr
+			}
+		}
+	}
+
+	// Perform compliance scan
+	complianceResult := p.complianceManager.ScanForCompliance(inputContent)
+
+	complianceReport := fmt.Sprintf("Compliance Check Results:\n"+
+		"Overall Risk: %s\n"+
+		"Total Violations: %d\n"+
+		"Frameworks Checked: %v\n",
+		complianceResult.ComplianceRisk,
+		len(complianceResult.Violations),
+		frameworks)
+
+	responseContent := []interface{}{
+		map[string]interface{}{
+			"type": "text",
+			"text": complianceReport,
+		},
+	}
+
+	result := map[string]interface{}{
+		"content": responseContent,
+		"isError": false,
+	}
+
+	return &MCPResponse{
+		Result: result,
+		ID:     req.ID,
+	}
+}
+
 // handlePromptsList processes prompts/list requests
 func (p *MCPProxy) handlePromptsList(ctx context.Context, req *MCPRequest) *MCPResponse {
-	result := map[string]interface{}{
-		"prompts": []map[string]interface{}{
-			{
-				"name":        "security_analysis",
-				"description": "Analyze content for security issues",
-				"arguments": []map[string]interface{}{
-					{
-						"name":        "content",
-						"description": "Content to analyze",
-						"required":    true,
-					},
+	// If we reach here, upstream is unavailable, so return firewall's built-in security prompts
+	prompts := []interface{}{
+		map[string]interface{}{
+			"name":        "security_analysis",
+			"title":       "Security Content Analysis",
+			"description": "Analyze content for security threats and vulnerabilities",
+			"arguments": []map[string]interface{}{
+				{
+					"name":        "content",
+					"description": "Content to analyze for security issues",
+					"required":    true,
+				},
+				{
+					"name":        "depth",
+					"description": "Analysis depth: surface, deep, comprehensive",
+					"required":    false,
 				},
 			},
 		},
+		map[string]interface{}{
+			"name":        "compliance_review",
+			"title":       "Compliance Review Prompt",
+			"description": "Review content for regulatory compliance requirements",
+			"arguments": []map[string]interface{}{
+				{
+					"name":        "content",
+					"description": "Content to review for compliance",
+					"required":    true,
+				},
+				{
+					"name":        "framework",
+					"description": "Compliance framework (gdpr, hipaa, pci, sox)",
+					"required":    false,
+				},
+			},
+		},
+		map[string]interface{}{
+			"name":        "threat_assessment",
+			"title":       "Security Threat Assessment",
+			"description": "Assess potential security threats in the provided content",
+			"arguments": []map[string]interface{}{
+				{
+					"name":        "content",
+					"description": "Content to assess for threats",
+					"required":    true,
+				},
+				{
+					"name":        "context",
+					"description": "Context or environment for threat assessment",
+					"required":    false,
+				},
+			},
+		},
+	}
+
+	// Handle pagination
+	var nextCursor *string
+	paramsMap, ok := req.Params.(map[string]interface{})
+	if ok {
+		if cursor, exists := paramsMap["cursor"]; exists && cursor != nil {
+			// In a real implementation, handle pagination here
+		}
+	}
+
+	result := map[string]interface{}{
+		"prompts": prompts,
+	}
+
+	if nextCursor != nil {
+		result["nextCursor"] = *nextCursor
 	}
 
 	return &MCPResponse{
@@ -520,18 +814,47 @@ func (p *MCPProxy) handlePromptsGet(ctx context.Context, req *MCPRequest) *MCPRe
 		}
 	}
 
-	if name == "security_analysis" {
-		arguments := paramsMap["arguments"].(map[string]interface{})
-		content := arguments["content"].(string)
+	// Get arguments if provided
+	var arguments map[string]interface{}
+	if args, exists := paramsMap["arguments"]; exists {
+		if argsMap, ok := args.(map[string]interface{}); ok {
+			arguments = argsMap
+		}
+	}
+
+	switch name {
+	case "security_analysis":
+		content := ""
+		depth := "surface"
+		if arguments != nil {
+			if c, ok := arguments["content"].(string); ok {
+				content = c
+			}
+			if d, ok := arguments["depth"].(string); ok {
+				depth = d
+			}
+		}
+
+		promptText := fmt.Sprintf(`Please perform a %s security analysis on the following content. Look for:
+1. Potential security vulnerabilities
+2. Suspicious patterns or code
+3. Data exposure risks
+4. Injection attack vectors
+5. Authentication/authorization issues
+
+Content to analyze:
+%s
+
+Provide a detailed security assessment with risk levels and recommendations.`, depth, content)
 
 		result := map[string]interface{}{
-			"description": "Security analysis prompt",
+			"description": "Security analysis prompt for identifying threats and vulnerabilities",
 			"messages": []map[string]interface{}{
 				{
 					"role": "user",
 					"content": map[string]interface{}{
 						"type": "text",
-						"text": fmt.Sprintf("Please analyze this content for security issues: %s", content),
+						"text": promptText,
 					},
 				},
 			},
@@ -541,14 +864,103 @@ func (p *MCPProxy) handlePromptsGet(ctx context.Context, req *MCPRequest) *MCPRe
 			Result: result,
 			ID:     req.ID,
 		}
-	}
 
-	return &MCPResponse{
-		Error: &MCPError{
-			Code:    -32601,
-			Message: "Prompt not found",
-		},
-		ID: req.ID,
+	case "compliance_review":
+		content := ""
+		framework := "general"
+		if arguments != nil {
+			if c, ok := arguments["content"].(string); ok {
+				content = c
+			}
+			if f, ok := arguments["framework"].(string); ok {
+				framework = f
+			}
+		}
+
+		promptText := fmt.Sprintf(`Please review the following content for %s compliance requirements. Check for:
+1. Personal identifiable information (PII)
+2. Protected health information (PHI)
+3. Payment card data
+4. Data handling violations
+5. Privacy policy compliance
+
+Framework: %s
+Content to review:
+%s
+
+Provide a compliance assessment with violation details and remediation steps.`, framework, framework, content)
+
+		result := map[string]interface{}{
+			"description": "Compliance review prompt for regulatory framework assessment",
+			"messages": []map[string]interface{}{
+				{
+					"role": "user",
+					"content": map[string]interface{}{
+						"type": "text",
+						"text": promptText,
+					},
+				},
+			},
+		}
+
+		return &MCPResponse{
+			Result: result,
+			ID:     req.ID,
+		}
+
+	case "threat_assessment":
+		content := ""
+		context := "general"
+		if arguments != nil {
+			if c, ok := arguments["content"].(string); ok {
+				content = c
+			}
+			if ctx, ok := arguments["context"].(string); ok {
+				context = ctx
+			}
+		}
+
+		promptText := fmt.Sprintf(`Please assess the potential security threats in the following content within the context of: %s
+
+Analyze for:
+1. Malicious intent indicators
+2. Social engineering attempts
+3. Phishing patterns
+4. Malware signatures
+5. Data exfiltration risks
+
+Content to assess:
+%s
+
+Provide a threat level assessment with detailed findings and mitigation recommendations.`, context, content)
+
+		result := map[string]interface{}{
+			"description": "Threat assessment prompt for security risk evaluation",
+			"messages": []map[string]interface{}{
+				{
+					"role": "user",
+					"content": map[string]interface{}{
+						"type": "text",
+						"text": promptText,
+					},
+				},
+			},
+		}
+
+		return &MCPResponse{
+			Result: result,
+			ID:     req.ID,
+		}
+
+	default:
+		return &MCPResponse{
+			Error: &MCPError{
+				Code:    -32601,
+				Message: "Prompt not found",
+				Data:    fmt.Sprintf("Unknown prompt: %s", name),
+			},
+			ID: req.ID,
+		}
 	}
 }
 

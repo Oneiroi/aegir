@@ -4,35 +4,38 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/spf13/viper"
 )
 
 // Config holds all configuration for the MCP Firewall
 type Config struct {
-	Environment string     `json:"environment"`
-	Server      Server     `json:"server"`
-	Auth        Auth       `json:"auth"`
-	Logging     Logging    `json:"logging"`
-	Security    Security   `json:"security"`
-	Compliance  Compliance `json:"compliance"`
-	Upstream    Upstream   `json:"upstream"`
+	Environment string     `json:"environment" mapstructure:"environment"`
+	Server      Server     `json:"server" mapstructure:"server"`
+	Auth        Auth       `json:"auth" mapstructure:"auth"`
+	Logging     Logging    `json:"logging" mapstructure:"logging"`
+	Security    Security   `json:"security" mapstructure:"security"`
+	Compliance  Compliance `json:"compliance" mapstructure:"compliance"`
+	Upstream    Upstream   `json:"upstream" mapstructure:"upstream"`
 }
 
 // Server configuration
 type Server struct {
-	Port         int    `json:"port"`
-	Host         string `json:"host"`
-	ReadTimeout  int    `json:"read_timeout"`
-	WriteTimeout int    `json:"write_timeout"`
-	TLS          TLS    `json:"tls"`
+	Port         int    `json:"port" mapstructure:"port"`
+	Host         string `json:"host" mapstructure:"host"`
+	ReadTimeout  int    `json:"read_timeout" mapstructure:"read_timeout"`
+	WriteTimeout int    `json:"write_timeout" mapstructure:"write_timeout"`
+	TLS          TLS    `json:"tls" mapstructure:"tls"`
 }
 
 // TLS configuration
 type TLS struct {
-	Enabled  bool   `json:"enabled"`
-	CertFile string `json:"cert_file"`
-	KeyFile  string `json:"key_file"`
-	MinTLS   string `json:"min_tls"`
+	Enabled  bool   `json:"enabled" mapstructure:"enabled"`
+	CertFile string `json:"cert_file" mapstructure:"cert_file"`
+	KeyFile  string `json:"key_file" mapstructure:"key_file"`
+	MinTLS   string `json:"min_tls" mapstructure:"min_tls"`
 }
 
 // Auth configuration
@@ -74,15 +77,15 @@ type MFA struct {
 
 // Logging configuration
 type Logging struct {
-	Level           string `json:"level"`
-	Format          string `json:"format"`
-	File            string `json:"file"`
-	MaxSize         int    `json:"max_size"`
-	MaxBackups      int    `json:"max_backups"`
-	MaxAge          int    `json:"max_age"`
-	Compress        bool   `json:"compress"`
-	HMACKey         string `json:"hmac_key"`
-	IntegrityChecks bool   `json:"integrity_checks"`
+	Level           string `json:"level" mapstructure:"level"`
+	Format          string `json:"format" mapstructure:"format"`
+	File            string `json:"file" mapstructure:"file"`
+	MaxSize         int    `json:"max_size" mapstructure:"max_size"`
+	MaxBackups      int    `json:"max_backups" mapstructure:"max_backups"`
+	MaxAge          int    `json:"max_age" mapstructure:"max_age"`
+	Compress        bool   `json:"compress" mapstructure:"compress"`
+	HMACKey         string `json:"hmac_key" mapstructure:"hmac_key"`
+	IntegrityChecks bool   `json:"integrity_checks" mapstructure:"integrity_checks"`
 }
 
 // Security configuration
@@ -256,8 +259,228 @@ type RetryConfig struct {
 	MaxBackoffMs int   `json:"max_backoff_ms"`
 }
 
-// Load loads configuration from environment variables and defaults
+// Load loads configuration from multiple sources with precedence:
+// 1. Command line flags (highest priority)
+// 2. Environment variables
+// 3. Configuration files
+// 4. Default values (lowest priority)
 func Load() (*Config, error) {
+	return LoadWithConfigFile("")
+}
+
+// LoadWithConfigFile loads configuration with a specific config file
+func LoadWithConfigFile(configFile string) (*Config, error) {
+	// Initialize viper
+	v := viper.New()
+
+	// Set up configuration file search
+	if configFile != "" {
+		// Use specific config file
+		v.SetConfigFile(configFile)
+	} else {
+		// Search for config files in standard locations
+		v.SetConfigName("mcp-firewall")
+		v.SetConfigType("yaml") // Default type
+
+		// Add configuration search paths
+		v.AddConfigPath(".")
+		v.AddConfigPath("./config")
+		v.AddConfigPath("/etc/mcp-firewall")
+		v.AddConfigPath("$HOME/.mcp-firewall")
+
+		// Support multiple file formats
+		v.SetConfigType("yaml")
+		if _, err := os.Stat("mcp-firewall.json"); err == nil {
+			v.SetConfigType("json")
+		}
+		if _, err := os.Stat("mcp-firewall.toml"); err == nil {
+			v.SetConfigType("toml")
+		}
+	}
+
+	// Enable environment variable support
+	v.AutomaticEnv()
+	v.SetEnvPrefix("MCP") // MCP_SERVER_PORT, etc.
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+
+	// Set default values first
+	setDefaults(v)
+
+	// Try to read config file (this will merge with defaults)
+	if err := v.ReadInConfig(); err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+			// Config file was found but another error was produced
+			return nil, fmt.Errorf("error reading config file: %w", err)
+		}
+		// Config file not found; ignore error and use defaults + env vars
+	}
+
+	// Unmarshal into config struct
+	var cfg Config
+	if err := v.Unmarshal(&cfg); err != nil {
+		return nil, fmt.Errorf("error unmarshaling config: %w", err)
+	}
+
+	// Validate configuration
+	if err := validateConfig(&cfg); err != nil {
+		return nil, fmt.Errorf("configuration validation failed: %w", err)
+	}
+
+	return &cfg, nil
+}
+
+// setDefaults sets default configuration values
+func setDefaults(v *viper.Viper) {
+	// Environment
+	v.SetDefault("environment", "development")
+
+	// Server defaults
+	v.SetDefault("server.port", 8443)
+	v.SetDefault("server.host", "localhost")
+	v.SetDefault("server.read_timeout", 10)
+	v.SetDefault("server.write_timeout", 10)
+
+	// TLS defaults
+	v.SetDefault("server.tls.enabled", true)
+	v.SetDefault("server.tls.cert_file", "certs/cert.pem")
+	v.SetDefault("server.tls.key_file", "certs/key.pem")
+	v.SetDefault("server.tls.min_tls", "1.3")
+
+	// Auth defaults
+	v.SetDefault("auth.jwt.secret", generateRandomSecret())
+	v.SetDefault("auth.jwt.issuer", "mcp-firewall")
+	v.SetDefault("auth.jwt.expiration_time", 3600)
+	v.SetDefault("auth.jwt.refresh_expiration", 86400)
+	v.SetDefault("auth.oauth.enabled", false)
+	v.SetDefault("auth.api_keys.enabled", true)
+	v.SetDefault("auth.mfa.required", false)
+	v.SetDefault("auth.mfa.providers", []string{"totp", "sms"})
+
+	// Logging defaults
+	v.SetDefault("logging.level", "info")
+	v.SetDefault("logging.format", "json")
+	v.SetDefault("logging.file", "logs/mcp-firewall.log")
+	v.SetDefault("logging.max_size", 100)
+	v.SetDefault("logging.max_backups", 10)
+	v.SetDefault("logging.max_age", 30)
+	v.SetDefault("logging.compress", true)
+	v.SetDefault("logging.hmac_key", generateRandomSecret())
+	v.SetDefault("logging.integrity_checks", true)
+
+	// Security defaults
+	v.SetDefault("security.rate_limit.enabled", true)
+	v.SetDefault("security.rate_limit.requests_per_min", 100)
+	v.SetDefault("security.rate_limit.burst_size", 20)
+	v.SetDefault("security.rate_limit.cleanup_interval", 300)
+
+	v.SetDefault("security.sanitization.enabled", true)
+	v.SetDefault("security.sanitization.xss_prevention", true)
+	v.SetDefault("security.sanitization.sql_injection", true)
+	v.SetDefault("security.sanitization.homoglyph_filter", true)
+	v.SetDefault("security.sanitization.formula_detection", true)
+	v.SetDefault("security.sanitization.prompt_injection", true)
+
+	v.SetDefault("security.encryption.algorithm", "AES-256-GCM")
+	v.SetDefault("security.encryption.key_size", 256)
+	v.SetDefault("security.encryption.key_rotation", 90)
+	v.SetDefault("security.encryption.hardware_hsm", false)
+
+	v.SetDefault("security.secret_detection.enabled", true)
+	v.SetDefault("security.secret_detection.api_keys", true)
+	v.SetDefault("security.secret_detection.ssh_keys", true)
+	v.SetDefault("security.secret_detection.certificates", true)
+	v.SetDefault("security.secret_detection.passwords", true)
+
+	v.SetDefault("security.command_injection.enabled", true)
+	v.SetDefault("security.command_injection.strict_mode", true)
+
+	// Compliance defaults
+	v.SetDefault("compliance.hipaa.enabled", false)
+	v.SetDefault("compliance.pci.enabled", false)
+	v.SetDefault("compliance.gdpr.enabled", false)
+	v.SetDefault("compliance.soc2.enabled", false)
+
+	// Upstream defaults
+	v.SetDefault("upstream.services", []map[string]interface{}{
+		{
+			"name":      "default-mcp-service",
+			"url":       "http://localhost:8080",
+			"transport": "http",
+			"weight":    100,
+			"priority":  1,
+			"enabled":   true,
+			"timeout":   30,
+			"tls": map[string]interface{}{
+				"enabled":     false,
+				"skip_verify": false,
+			},
+		},
+	})
+
+	v.SetDefault("upstream.discovery.enabled", false)
+	v.SetDefault("upstream.discovery.provider", "static")
+	v.SetDefault("upstream.discovery.interval", 30)
+
+	v.SetDefault("upstream.load_balancing.strategy", "round_robin")
+
+	v.SetDefault("upstream.health_check.enabled", true)
+	v.SetDefault("upstream.health_check.interval", 30)
+	v.SetDefault("upstream.health_check.timeout", 5)
+	v.SetDefault("upstream.health_check.healthy_threshold", 2)
+	v.SetDefault("upstream.health_check.unhealthy_threshold", 3)
+	v.SetDefault("upstream.health_check.path", "/health")
+	v.SetDefault("upstream.health_check.expected_codes", []int{200, 204})
+
+	v.SetDefault("upstream.circuit_breaker.enabled", true)
+	v.SetDefault("upstream.circuit_breaker.failure_threshold", 5)
+	v.SetDefault("upstream.circuit_breaker.recovery_timeout", 60)
+	v.SetDefault("upstream.circuit_breaker.half_open_requests", 3)
+
+	v.SetDefault("upstream.retry.enabled", true)
+	v.SetDefault("upstream.retry.max_retries", 3)
+	v.SetDefault("upstream.retry.backoff_ms", 100)
+	v.SetDefault("upstream.retry.max_backoff_ms", 1000)
+}
+
+// validateConfig validates the loaded configuration
+func validateConfig(cfg *Config) error {
+	// Validate server configuration
+	if cfg.Server.Port <= 0 || cfg.Server.Port > 65535 {
+		return fmt.Errorf("invalid server port: %d", cfg.Server.Port)
+	}
+
+	// Validate TLS configuration
+	if cfg.Server.TLS.Enabled {
+		if cfg.Server.TLS.CertFile == "" {
+			return fmt.Errorf("TLS enabled but cert_file not specified")
+		}
+		if cfg.Server.TLS.KeyFile == "" {
+			return fmt.Errorf("TLS enabled but key_file not specified")
+		}
+	}
+
+	// Validate upstream services
+	if len(cfg.Upstream.Services) == 0 {
+		return fmt.Errorf("no upstream services configured")
+	}
+
+	for i, service := range cfg.Upstream.Services {
+		if service.Name == "" {
+			return fmt.Errorf("upstream service %d: name is required", i)
+		}
+		if service.URL == "" {
+			return fmt.Errorf("upstream service %s: URL is required", service.Name)
+		}
+		if service.Timeout <= 0 {
+			return fmt.Errorf("upstream service %s: timeout must be positive", service.Name)
+		}
+	}
+
+	return nil
+}
+
+// LoadLegacy loads configuration from environment variables and defaults (legacy method)
+func LoadLegacy() (*Config, error) {
 	cfg := &Config{
 		Environment: getEnv("MCP_ENV", "development"),
 		Server: Server{
