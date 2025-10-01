@@ -674,11 +674,33 @@ func (m *Manager) detectRepetitionAttack(content string) bool {
 
 // removeExcessiveRepetition removes excessive repetition from content
 func (m *Manager) removeExcessiveRepetition(content string) string {
-	// Remove excessive character repetition
-	re := regexp.MustCompile(`(.)\1{10,}`)
-	content = re.ReplaceAllStringFunc(content, func(match string) string {
-		return string(match[0]) + string(match[0]) + string(match[0]) + "[REPETITION_REMOVED]"
-	})
+	// Remove excessive character repetition (11+ consecutive identical characters)
+	// Go doesn't support backreferences, so we'll use a different approach
+	var result strings.Builder
+	runes := []rune(content)
+
+	for i := 0; i < len(runes); i++ {
+		char := runes[i]
+		count := 1
+
+		// Count consecutive identical characters
+		for j := i + 1; j < len(runes) && runes[j] == char; j++ {
+			count++
+		}
+
+		// If we have more than 10 consecutive chars, limit to 3 + marker
+		if count > 10 {
+			result.WriteRune(char)
+			result.WriteRune(char)
+			result.WriteRune(char)
+			result.WriteString("[REPETITION_REMOVED]")
+			i += count - 1 // Skip the repeated characters
+		} else {
+			result.WriteRune(char)
+		}
+	}
+
+	content = result.String()
 
 	// Remove excessive word repetition
 	words := strings.Fields(content)

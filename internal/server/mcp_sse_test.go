@@ -14,6 +14,7 @@ import (
 	"github.com/aegishjalmur/mcp-firewall/internal/config"
 	"github.com/aegishjalmur/mcp-firewall/internal/logging"
 	"github.com/aegishjalmur/mcp-firewall/internal/sanitizer"
+	"github.com/aegishjalmur/mcp-firewall/internal/upstream"
 	"github.com/gin-gonic/gin"
 )
 
@@ -43,7 +44,11 @@ func createTestMCPProxyForSSE() *MCPProxy {
 	}
 	complianceMgr := sanitizer.NewComplianceManager(compCfg, logger)
 
-	return NewMCPProxy(logger, sanitizerMgr, complianceMgr)
+	// Create test upstream manager
+	upstreamCfg := &config.Upstream{}
+	upstreamMgr := upstream.NewManager(upstreamCfg, logger)
+
+	return NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr)
 }
 
 func TestSSEConnectionEstablishment(t *testing.T) {
