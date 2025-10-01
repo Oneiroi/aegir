@@ -1,0 +1,192 @@
+# Aegir Configuration - TOML Example
+# This configuration shows development settings with minimal security for local testing
+
+# Environment setting
+environment = "development"
+
+[server]
+port = 8443
+host = "127.0.0.1"
+read_timeout = 10
+write_timeout = 10
+
+[server.tls]
+enabled = true
+cert_file = "certs/cert.pem"
+key_file = "certs/key.pem"
+min_tls = "1.2"  # Relaxed for development
+
+[auth]
+[auth.jwt]
+secret = "dev-secret-key-change-in-production"
+issuer = "aegir-dev"
+expiration_time = 7200  # Longer expiration for development
+refresh_expiration = 86400
+
+[auth.oauth]
+enabled = false
+client_id = ""
+client_secret = ""
+redirect_url = ""
+auth_url = ""
+token_url = ""
+
+[auth.api_keys]
+enabled = true
+
+[auth.mfa]
+required = false  # Disabled for development convenience
+providers = ["totp"]
+
+[logging]
+level = "debug"  # Verbose logging for development
+format = "text"  # Human-readable format
+file = "logs/aegir.log"
+max_size = 50
+max_backups = 5
+max_age = 7
+compress = false  # No compression for easier debugging
+hmac_key = "dev-hmac-key-change-in-production"
+integrity_checks = false  # Disabled for development
+
+[security]
+[security.rate_limit]
+enabled = false  # Disabled for development
+requests_per_min = 1000
+burst_size = 100
+cleanup_interval = 300
+
+[security.sanitization]
+enabled = true
+xss_prevention = true
+sql_injection = true
+homoglyph_filter = false  # Relaxed for development
+formula_detection = true
+prompt_injection = true
+
+[security.encryption]
+algorithm = "AES-256-GCM"
+key_size = 256
+key_rotation = 180  # Longer rotation for development
+hardware_hsm = false
+cloud_kms = ""
+
+[security.secret_detection]
+enabled = true
+api_keys = true
+ssh_keys = true
+certificates = true
+passwords = false  # Relaxed for development
+custom_patterns = []
+
+[security.command_injection]
+enabled = true
+strict_mode = false  # Relaxed for development
+block_list = []
+allow_list = []
+
+[compliance]
+[compliance.hipaa]
+enabled = false
+phi_detection = false
+encryption = false
+audit_trail = false
+
+[compliance.pci]
+enabled = false
+card_detection = false
+tokenize_cards = false
+encrypt_storage = false
+
+[compliance.gdpr]
+enabled = false
+pii_detection = false
+right_to_erasure = false
+data_portability = false
+consent_tracking = false
+region = "US"
+
+[compliance.soc2]
+enabled = false
+type2 = false
+
+[upstream]
+[upstream.discovery]
+enabled = false
+provider = "static"
+endpoint = ""
+namespace = ""
+interval = 60
+
+[upstream.load_balancing]
+strategy = "round_robin"
+sticky_key = ""
+hash_key = ""
+
+[upstream.health_check]
+enabled = true
+interval = 60  # Less frequent for development
+timeout = 10
+healthy_threshold = 1
+unhealthy_threshold = 5  # More tolerant for development
+path = "/health"
+expected_codes = [200, 204, 404]  # More tolerant for development
+
+[upstream.circuit_breaker]
+enabled = false  # Disabled for development
+failure_threshold = 10
+recovery_timeout = 120
+half_open_requests = 1
+
+[upstream.retry]
+enabled = true
+max_retries = 1  # Fewer retries for faster development feedback
+backoff_ms = 50
+max_backoff_ms = 500
+
+# Development services configuration
+[[upstream.services]]
+name = "local-mcp-service"
+url = "http://localhost:8080"
+transport = "http"
+weight = 100
+priority = 1
+enabled = true
+timeout = 30
+tags = ["development", "local"]
+
+[upstream.services.metadata]
+datacenter = "local"
+version = "dev"
+team = "development"
+
+[upstream.services.tls]
+enabled = false  # No TLS for local development
+skip_verify = true
+client_cert_file = ""
+client_key_file = ""
+ca_cert_file = ""
+server_name = ""
+
+[[upstream.services]]
+name = "mock-mcp-service"
+url = "http://localhost:8081"
+transport = "http"
+weight = 0  # Disabled by default
+priority = 2
+enabled = false
+timeout = 30
+tags = ["development", "mock", "testing"]
+
+[upstream.services.metadata]
+datacenter = "local"
+version = "mock"
+team = "development"
+
+[upstream.services.tls]
+enabled = false
+skip_verify = true
+client_cert_file = ""
+client_key_file = ""
+ca_cert_file = ""
+server_name = ""

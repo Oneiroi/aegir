@@ -1,0 +1,33 @@
+# MCP Firewall - Simple Configuration
+# Basic configuration for local development
+
+environment: development
+
+server:
+  port: 8443
+  host: localhost
+  tls:
+    enabled: true
+    cert_file: certs/cert.pem
+    key_file: certs/key.pem
+
+auth:
+  jwt:
+    secret: "simple-dev-key-change-for-production"
+
+logging:
+  level: info
+  format: text
+  hmac_key: "development-hmac-key-that-is-definitely-32-characters-long"
+
+security:
+  sanitization:
+    enabled: true
+    prompt_injection: true
+
+upstream:
+  services:
+    - name: local-mcp-service
+      url: http://localhost:8080
+      enabled: true
+      timeout: 30

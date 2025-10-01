@@ -1,0 +1,210 @@
+# Aegir Configuration - YAML Example
+# This configuration shows all available options with detailed comments
+
+# Environment setting (development, staging, production)
+environment: development
+
+# Server configuration
+server:
+  port: 8443                    # HTTPS port
+  host: "localhost"             # Server bind address
+  read_timeout: 10              # Read timeout in seconds
+  write_timeout: 10             # Write timeout in seconds
+
+  # TLS/SSL configuration
+  tls:
+    enabled: true
+    cert_file: "certs/cert.pem"
+    key_file: "certs/key.pem"
+    min_tls: "1.3"              # Minimum TLS version
+
+# Authentication configuration
+auth:
+  # JWT token configuration
+  jwt:
+    secret: "your-super-secret-jwt-key-min-32-chars"
+    issuer: "aegir"
+    expiration_time: 3600       # Token expiration in seconds
+    refresh_expiration: 86400   # Refresh token expiration in seconds
+
+  # OAuth configuration (optional)
+  oauth:
+    enabled: false
+    client_id: ""
+    client_secret: ""
+    redirect_url: ""
+    auth_url: ""
+    token_url: ""
+
+  # API key authentication
+  api_keys:
+    enabled: true
+
+  # Multi-factor authentication
+  mfa:
+    required: false
+    providers:
+      - "totp"
+      - "sms"
+
+# Logging configuration
+logging:
+  level: "info"                 # debug, info, warn, error
+  format: "json"                # json, text
+  file: "logs/aegir.log"
+  max_size: 100                 # Maximum log file size in MB
+  max_backups: 10               # Number of backup log files to keep
+  max_age: 30                   # Maximum age of log files in days
+  compress: true                # Compress old log files
+  hmac_key: "your-super-secret-hmac-key-min-32-chars"
+  integrity_checks: true        # Enable log integrity verification
+
+# Security configuration
+security:
+  # Rate limiting
+  rate_limit:
+    enabled: true
+    requests_per_min: 100       # Maximum requests per minute per client
+    burst_size: 20              # Burst capacity
+    cleanup_interval: 300       # Cleanup interval in seconds
+
+  # Content sanitization
+  sanitization:
+    enabled: true
+    xss_prevention: true        # Cross-site scripting prevention
+    sql_injection: true         # SQL injection prevention
+    homoglyph_filter: true      # Unicode homoglyph filtering
+    formula_detection: true     # Malicious formula detection
+    prompt_injection: true      # Prompt injection prevention
+
+  # Encryption settings
+  encryption:
+    algorithm: "AES-256-GCM"
+    key_size: 256
+    key_rotation: 90            # Key rotation period in days
+    hardware_hsm: false         # Use hardware security module
+    cloud_kms: ""               # Cloud KMS service (AWS, GCP, Azure)
+
+  # Secret detection
+  secret_detection:
+    enabled: true
+    api_keys: true              # Detect API keys in content
+    ssh_keys: true              # Detect SSH private keys
+    certificates: true          # Detect certificates and private keys
+    passwords: true             # Detect common password patterns
+    custom_patterns: []         # Custom regex patterns
+
+  # Command injection prevention
+  command_injection:
+    enabled: true
+    strict_mode: true           # Strict mode blocks more patterns
+    block_list: []              # Additional blocked command patterns
+    allow_list: []              # Explicitly allowed patterns
+
+# Compliance configuration
+compliance:
+  # HIPAA compliance for healthcare data
+  hipaa:
+    enabled: false
+    phi_detection: false        # Detect protected health information
+    encryption: false           # HIPAA-compliant encryption
+    audit_trail: false          # Enhanced audit logging
+
+  # PCI DSS compliance for payment data
+  pci:
+    enabled: false
+    card_detection: false       # Detect credit card numbers
+    tokenize_cards: false       # Tokenize detected card numbers
+    encrypt_storage: false      # PCI-compliant encryption
+
+  # GDPR compliance for EU data protection
+  gdpr:
+    enabled: false
+    pii_detection: false        # Detect personally identifiable information
+    right_to_erasure: false     # Support data deletion requests
+    data_portability: false     # Support data export requests
+    consent_tracking: false     # Track user consent
+    region: "EU"                # GDPR region
+
+  # SOC 2 compliance for security controls
+  soc2:
+    enabled: false
+    type2: false                # SOC 2 Type II compliance
+
+# Upstream service configuration (core proxy functionality)
+upstream:
+  # List of backend MCP services
+  services:
+    - name: "primary-mcp-service"
+      url: "http://localhost:8080"
+      transport: "http"         # http, stdio, sse
+      weight: 100               # Load balancing weight
+      priority: 1               # Service priority (lower = higher priority)
+      enabled: true
+      timeout: 30               # Request timeout in seconds
+      tags:
+        - "primary"
+        - "production"
+      metadata:
+        datacenter: "us-east-1"
+        version: "1.0.0"
+
+      # TLS configuration for upstream connections
+      tls:
+        enabled: false
+        skip_verify: false      # Skip TLS certificate verification (dev only)
+        client_cert_file: ""    # Client certificate for mutual TLS
+        client_key_file: ""     # Client private key for mutual TLS
+        ca_cert_file: ""        # CA certificate for verification
+        server_name: ""         # Expected server name in certificate
+
+    - name: "backup-mcp-service"
+      url: "http://localhost:8081"
+      transport: "http"
+      weight: 50
+      priority: 2
+      enabled: true
+      timeout: 30
+      tls:
+        enabled: false
+        skip_verify: false
+
+  # Service discovery configuration
+  discovery:
+    enabled: false              # Enable automatic service discovery
+    provider: "static"          # static, consul, dns, kubernetes
+    endpoint: ""                # Discovery endpoint URL
+    namespace: ""               # Service namespace
+    interval: 30                # Discovery refresh interval in seconds
+
+  # Load balancing configuration
+  load_balancing:
+    strategy: "round_robin"     # round_robin, weighted, least_connections, random
+    sticky_key: ""              # Header/cookie name for sticky sessions
+    hash_key: ""                # Key for consistent hashing
+
+  # Health checking configuration
+  health_check:
+    enabled: true
+    interval: 30                # Health check interval in seconds
+    timeout: 5                  # Health check timeout in seconds
+    healthy_threshold: 2        # Consecutive successes to mark healthy
+    unhealthy_threshold: 3      # Consecutive failures to mark unhealthy
+    path: "/health"             # Health check endpoint path
+    expected_codes:             # Expected HTTP status codes
+      - 200
+      - 204
+
+  # Circuit breaker configuration
+  circuit_breaker:
+    enabled: true
+    failure_threshold: 5        # Failures before opening circuit
+    recovery_timeout: 60        # Seconds before attempting recovery
+    half_open_requests: 3       # Test requests in half-open state
+
+  # Retry configuration
+  retry:
+    enabled: true
+    max_retries: 3              # Maximum retry attempts
+    backoff_ms: 100             # Initial backoff in milliseconds
+    max_backoff_ms: 1000        # Maximum backoff in milliseconds
