@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aegishjalmur/mcp-firewall/internal/config"
-	"github.com/aegishjalmur/mcp-firewall/internal/logging"
+	"github.com/aegishjalmur/aegir/internal/config"
+	"github.com/aegishjalmur/aegir/internal/logging"
 )
 
 // TestConversationalAttackDetection tests multi-turn attack detection

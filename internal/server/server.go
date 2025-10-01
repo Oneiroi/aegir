@@ -4,13 +4,13 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/aegishjalmur/mcp-firewall/internal/auth"
-	"github.com/aegishjalmur/mcp-firewall/internal/config"
-	"github.com/aegishjalmur/mcp-firewall/internal/crypto"
-	"github.com/aegishjalmur/mcp-firewall/internal/dashboard"
-	"github.com/aegishjalmur/mcp-firewall/internal/logging"
-	"github.com/aegishjalmur/mcp-firewall/internal/sanitizer"
-	"github.com/aegishjalmur/mcp-firewall/internal/upstream"
+	"github.com/aegishjalmur/aegir/internal/auth"
+	"github.com/aegishjalmur/aegir/internal/config"
+	"github.com/aegishjalmur/aegir/internal/crypto"
+	"github.com/aegishjalmur/aegir/internal/dashboard"
+	"github.com/aegishjalmur/aegir/internal/logging"
+	"github.com/aegishjalmur/aegir/internal/sanitizer"
+	"github.com/aegishjalmur/aegir/internal/upstream"
 	"github.com/gin-gonic/gin"
 )
 

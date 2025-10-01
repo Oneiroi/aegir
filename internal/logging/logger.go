@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aegishjalmur/mcp-firewall/internal/config"
+	"github.com/aegishjalmur/aegir/internal/config"
 	"github.com/sirupsen/logrus"
 )
 

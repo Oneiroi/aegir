@@ -1,4 +1,4 @@
-module github.com/aegishjalmur/mcp-firewall
+module github.com/aegishjalmur/aegir
 
 go 1.24.0
 

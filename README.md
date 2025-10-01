@@ -1,4 +1,4 @@
-# MCP Firewall
+# Aegir
 
 A comprehensive security gateway for Model Context Protocol (MCP) servers that implements enterprise-grade security controls, compliance frameworks, and threat protection.
 
@@ -95,8 +95,8 @@ A comprehensive security gateway for Model Context Protocol (MCP) servers that i
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/aegishjalmur/mcp-firewall.git
-   cd mcp-firewall
+   git clone https://github.com/aegishjalmur/aegir.git
+   cd aegir
    ```
 
 2. Copy the example environment file:
@@ -263,7 +263,7 @@ BSL License - see [LICENSE](LICENSE) file for details.
 ## Support
 
 For issues and questions:
-- GitHub Issues: [https://github.com/oneiroi/mcp-firewall/issues](https://github.com/oneiroi/mcp-firewall/issues)
+- GitHub Issues: [https://github.com/oneiroi/aegir/issues](https://github.com/oneiroi/aegir/issues)
 - Security Issues: security@oneiroi.co.uk
 
 ## Compliance Certifications

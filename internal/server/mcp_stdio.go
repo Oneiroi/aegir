@@ -10,8 +10,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/aegishjalmur/mcp-firewall/internal/logging"
-	"github.com/aegishjalmur/mcp-firewall/internal/sanitizer"
+	"github.com/aegishjalmur/aegir/internal/logging"
+	"github.com/aegishjalmur/aegir/internal/sanitizer"
 )
 
 // MCPSTDIOTransport handles STDIO-based MCP communication

@@ -292,21 +292,21 @@ func LoadWithConfigFile(configFile string) (*Config, error) {
 		v.SetConfigFile(configFile)
 	} else {
 		// Search for config files in standard locations
-		v.SetConfigName("mcp-firewall")
+		v.SetConfigName("aegir")
 		v.SetConfigType("yaml") // Default type
 
 		// Add configuration search paths
 		v.AddConfigPath(".")
 		v.AddConfigPath("./config")
-		v.AddConfigPath("/etc/mcp-firewall")
-		v.AddConfigPath("$HOME/.mcp-firewall")
+		v.AddConfigPath("/etc/aegir")
+		v.AddConfigPath("$HOME/.aegir")
 
 		// Support multiple file formats
 		v.SetConfigType("yaml")
-		if _, err := os.Stat("mcp-firewall.json"); err == nil {
+		if _, err := os.Stat("aegir.json"); err == nil {
 			v.SetConfigType("json")
 		}
-		if _, err := os.Stat("mcp-firewall.toml"); err == nil {
+		if _, err := os.Stat("aegir.toml"); err == nil {
 			v.SetConfigType("toml")
 		}
 	}
@@ -348,16 +348,16 @@ func LoadWithConfigDir(configDir string) (*Config, error) {
 	v := viper.New()
 
 	// Set up configuration directory search
-	v.SetConfigName("mcp-firewall")
+	v.SetConfigName("aegir")
 	v.SetConfigType("yaml") // Default type
 	v.AddConfigPath(configDir)
 
 	// Support multiple file formats in the directory
 	v.SetConfigType("yaml")
-	if _, err := os.Stat(configDir + "/mcp-firewall.json"); err == nil {
+	if _, err := os.Stat(configDir + "/aegir.json"); err == nil {
 		v.SetConfigType("json")
 	}
-	if _, err := os.Stat(configDir + "/mcp-firewall.toml"); err == nil {
+	if _, err := os.Stat(configDir + "/aegir.toml"); err == nil {
 		v.SetConfigType("toml")
 	}
 
@@ -411,7 +411,7 @@ func setDefaults(v *viper.Viper) {
 
 	// Auth defaults
 	v.SetDefault("auth.jwt.secret", generateRandomSecret())
-	v.SetDefault("auth.jwt.issuer", "mcp-firewall")
+	v.SetDefault("auth.jwt.issuer", "aegir")
 	v.SetDefault("auth.jwt.expiration_time", 3600)
 	v.SetDefault("auth.jwt.refresh_expiration", 86400)
 	v.SetDefault("auth.oauth.enabled", false)
@@ -422,7 +422,7 @@ func setDefaults(v *viper.Viper) {
 	// Logging defaults
 	v.SetDefault("logging.level", "info")
 	v.SetDefault("logging.format", "json")
-	v.SetDefault("logging.file", "logs/mcp-firewall.log")
+	v.SetDefault("logging.file", "logs/aegir.log")
 	v.SetDefault("logging.max_size", 100)
 	v.SetDefault("logging.max_backups", 10)
 	v.SetDefault("logging.max_age", 30)
@@ -571,7 +571,7 @@ func LoadLegacy() (*Config, error) {
 		Auth: Auth{
 			JWT: JWT{
 				Secret:            getEnv("JWT_SECRET", generateRandomSecret()),
-				Issuer:            getEnv("JWT_ISSUER", "mcp-firewall"),
+				Issuer:            getEnv("JWT_ISSUER", "aegir"),
 				ExpirationTime:    time.Duration(getEnvAsInt("JWT_EXPIRATION", 3600)) * time.Second,
 				RefreshExpiration: time.Duration(getEnvAsInt("JWT_REFRESH_EXPIRATION", 86400)) * time.Second,
 			},
@@ -594,7 +594,7 @@ func LoadLegacy() (*Config, error) {
 		Logging: Logging{
 			Level:           getEnv("LOG_LEVEL", "info"),
 			Format:          getEnv("LOG_FORMAT", "json"),
-			File:            getEnv("LOG_FILE", "logs/mcp-firewall.log"),
+			File:            getEnv("LOG_FILE", "logs/aegir.log"),
 			MaxSize:         getEnvAsInt("LOG_MAX_SIZE", 100),
 			MaxBackups:      getEnvAsInt("LOG_MAX_BACKUPS", 10),
 			MaxAge:          getEnvAsInt("LOG_MAX_AGE", 30),

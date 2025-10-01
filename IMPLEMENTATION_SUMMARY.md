@@ -1,8 +1,8 @@
-# MCP Security Firewall - Implementation Summary
+# Aegir - Implementation Summary
 
 ## Overview
 
-The MCP Security Firewall is a comprehensive security gateway for Model Context Protocol (MCP) servers that implements enterprise-grade security controls, compliance frameworks, and threat protection. This implementation follows the detailed security specification provided and includes all major security features.
+Aegir is a comprehensive security gateway for Model Context Protocol (MCP) servers that implements enterprise-grade security controls, compliance frameworks, and threat protection. This implementation follows the detailed security specification provided and includes all major security features.
 
 ## ✅ Completed Features
 
@@ -162,7 +162,7 @@ The MCP Security Firewall is a comprehensive security gateway for Model Context 
 
 ### Project Structure
 ```
-mcp-firewall/
+aegir/
 ├── cmd/server/           # Main application entry point
 ├── internal/
 │   ├── auth/            # Authentication and authorization
@@ -261,7 +261,7 @@ mcp-firewall/
 ```bash
 # Clone and setup
 git clone <repository>
-cd mcp-firewall
+cd aegir
 
 # Install dependencies
 go mod download
@@ -291,7 +291,7 @@ make run
 # Start HTTP server with all endpoints (including SSE)
 make run
 # or
-./bin/mcp-firewall -transport http
+./bin/aegir -transport http
 
 # Health check
 curl -k https://localhost:8443/health
@@ -320,7 +320,7 @@ curl -k --include \
 #### Server-Sent Events (SSE) Mode
 ```bash
 # Start server with SSE endpoints
-./bin/mcp-firewall -transport sse
+./bin/aegir -transport sse
 
 # Connect to SSE stream
 curl -k -H "Authorization: Bearer <jwt-token>" \
@@ -339,14 +339,14 @@ curl -k -H "Authorization: Bearer <jwt-token>" \
 # Start in STDIO mode
 make run-stdio
 # or
-./bin/mcp-firewall -transport stdio
+./bin/aegir -transport stdio
 
 # Send MCP requests via stdin/stdout
 echo '{"method":"initialize","params":{"protocolVersion":"2024-11-05"},"id":"1"}' | \
-  ./bin/mcp-firewall -transport stdio
+  ./bin/aegir -transport stdio
 
 echo '{"method":"tools/list","params":{},"id":"2"}' | \
-  ./bin/mcp-firewall -transport stdio
+  ./bin/aegir -transport stdio
 ```
 
 ## 📈 Performance & Scale
@@ -369,11 +369,11 @@ The firewall supports multiple configuration sources with priority order:
 4. **Default values** (lowest priority)
 
 ### Configuration Files
-- **YAML**: `mcp-firewall.yaml` (primary format)
-- **JSON**: `mcp-firewall.json` (structured format)
-- **TOML**: `mcp-firewall.toml` (human-friendly format)
+- **YAML**: `aegir.yaml` (primary format)
+- **JSON**: `aegir.json` (structured format)
+- **TOML**: `aegir.toml` (human-friendly format)
 
-Search paths: `.`, `./config`, `/etc/mcp-firewall`, `$HOME/.mcp-firewall`
+Search paths: `.`, `./config`, `/etc/aegir`, `$HOME/.aegir`
 
 ### Configuration Categories
 - **Security**: Rate limits, encryption settings, detection thresholds
@@ -386,7 +386,7 @@ Search paths: `.`, `./config`, `/etc/mcp-firewall`, `$HOME/.mcp-firewall`
 
 ### CLI Configuration Support
 - ✅ `--config /path/to/config.yaml` - Specify configuration file
-- ✅ `--config-dir /etc/mcp-firewall` - Specify configuration directory
+- ✅ `--config-dir /etc/aegir` - Specify configuration directory
 - ✅ `--show-config` - Display current configuration and exit
 - ✅ `--help` - Enhanced help with configuration examples
 

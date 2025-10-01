@@ -2,19 +2,19 @@
 
 # Build the application
 build:
-	go build -o bin/mcp-firewall ./cmd/server
+	go build -o bin/aegir ./cmd/server
 
 # Run the application (default: HTTP mode)
 run: build certs
-	./bin/mcp-firewall
+	./bin/aegir
 
 # Run in STDIO mode
 run-stdio: build
-	./bin/mcp-firewall -transport stdio
+	./bin/aegir -transport stdio
 
 # Run in SSE mode (same as HTTP with SSE endpoints)
 run-sse: build certs
-	./bin/mcp-firewall -transport sse
+	./bin/aegir -transport sse
 
 # Run in development mode with hot reload
 dev: certs
@@ -44,4 +44,4 @@ deps:
 # Generate certificates for development
 certs:
 	mkdir -p certs
-	openssl req -x509 -newkey rsa:4096 -keyout certs/key.pem -out certs/cert.pem -days 365 -nodes -subj "/C=US/ST=CA/L=SF/O=MCP-Firewall/CN=localhost"
+	openssl req -x509 -newkey rsa:4096 -keyout certs/key.pem -out certs/cert.pem -days 365 -nodes -subj "/C=US/ST=CA/L=SF/O=Aegir/CN=localhost"

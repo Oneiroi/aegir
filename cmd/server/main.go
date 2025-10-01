@@ -12,8 +12,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aegishjalmur/mcp-firewall/internal/config"
-	"github.com/aegishjalmur/mcp-firewall/internal/server"
+	"github.com/aegishjalmur/aegir/internal/config"
+	"github.com/aegishjalmur/aegir/internal/server"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 )
@@ -39,14 +39,14 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  3. Configuration files (YAML, JSON, TOML)\n")
 		fmt.Fprintf(os.Stderr, "  4. Default values (lowest priority)\n\n")
 		fmt.Fprintf(os.Stderr, "  Default config file search paths:\n")
-		fmt.Fprintf(os.Stderr, "  - ./mcp-firewall.yaml\n")
-		fmt.Fprintf(os.Stderr, "  - ./config/mcp-firewall.yaml\n")
-		fmt.Fprintf(os.Stderr, "  - /etc/mcp-firewall/mcp-firewall.yaml\n")
-		fmt.Fprintf(os.Stderr, "  - $HOME/.mcp-firewall/mcp-firewall.yaml\n\n")
+		fmt.Fprintf(os.Stderr, "  - ./aegir.yaml\n")
+		fmt.Fprintf(os.Stderr, "  - ./config/aegir.yaml\n")
+		fmt.Fprintf(os.Stderr, "  - /etc/aegir/aegir.yaml\n")
+		fmt.Fprintf(os.Stderr, "  - $HOME/.aegir/aegir.yaml\n\n")
 		fmt.Fprintf(os.Stderr, "Examples:\n")
 		fmt.Fprintf(os.Stderr, "  %s --transport http\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s --config /path/to/config.yaml\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  %s --config-dir /etc/mcp-firewall\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s --config-dir /etc/aegir\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s --show-config\n", os.Args[0])
 	}
 

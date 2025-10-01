@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aegishjalmur/mcp-firewall/internal/config"
-	"github.com/aegishjalmur/mcp-firewall/internal/logging"
-	"github.com/aegishjalmur/mcp-firewall/internal/sanitizer"
-	"github.com/aegishjalmur/mcp-firewall/internal/upstream"
+	"github.com/aegishjalmur/aegir/internal/config"
+	"github.com/aegishjalmur/aegir/internal/logging"
+	"github.com/aegishjalmur/aegir/internal/sanitizer"
+	"github.com/aegishjalmur/aegir/internal/upstream"
 	"github.com/gin-gonic/gin"
 )
 

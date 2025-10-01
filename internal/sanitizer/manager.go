@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aegishjalmur/mcp-firewall/internal/config"
-	"github.com/aegishjalmur/mcp-firewall/internal/logging"
+	"github.com/aegishjalmur/aegir/internal/config"
+	"github.com/aegishjalmur/aegir/internal/logging"
 )
 
 // Manager handles content sanitization and security filtering

@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aegishjalmur/mcp-firewall/internal/logging"
+	"github.com/aegishjalmur/aegir/internal/logging"
 )
 
 // ConversationalThreatAnalyzer detects multi-turn attack patterns

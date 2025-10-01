@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aegishjalmur/mcp-firewall/internal/config"
-	"github.com/aegishjalmur/mcp-firewall/internal/logging"
+	"github.com/aegishjalmur/aegir/internal/config"
+	"github.com/aegishjalmur/aegir/internal/logging"
 	"github.com/gin-gonic/gin"
 	"golang.org/x/time/rate"
 )

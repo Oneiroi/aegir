@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/aegishjalmur/mcp-firewall/internal/logging"
+	"github.com/aegishjalmur/aegir/internal/logging"
 )
 
 // AttackCategory represents different types of attacks detected

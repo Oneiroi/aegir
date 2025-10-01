@@ -11,8 +11,8 @@ import (
 	"io"
 	"time"
 
-	"github.com/aegishjalmur/mcp-firewall/internal/config"
-	"github.com/aegishjalmur/mcp-firewall/internal/logging"
+	"github.com/aegishjalmur/aegir/internal/config"
+	"github.com/aegishjalmur/aegir/internal/logging"
 )
 
 // EncryptionManager handles data encryption and key management
@@ -270,7 +270,7 @@ func (em *EncryptionManager) DecryptSensitiveData(encrypted *EncryptedData, data
 func (em *EncryptionManager) initializeMasterKey() error {
 	// In production, this would load from a secure key management service
 	// For now, we'll generate a deterministic key from a secret
-	masterSecret := "mcp-firewall-master-secret-2024"
+	masterSecret := "aegir-master-secret-2024"
 	hash := sha256.Sum256([]byte(masterSecret))
 	em.masterKey = hash[:]
 

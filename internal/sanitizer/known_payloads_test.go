@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aegishjalmur/mcp-firewall/internal/config"
-	"github.com/aegishjalmur/mcp-firewall/internal/logging"
+	"github.com/aegishjalmur/aegir/internal/config"
+	"github.com/aegishjalmur/aegir/internal/logging"
 )
 
 // TestKnownAttackPayloads tests the firewall against a comprehensive set of known attack vectors

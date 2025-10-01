@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aegishjalmur/mcp-firewall/internal/config"
+	"github.com/aegishjalmur/aegir/internal/config"
 )
 
 func TestTransportModeSelection(t *testing.T) {
@@ -26,19 +26,19 @@ func TestTransportModeSelection(t *testing.T) {
 			name:           "HTTP mode",
 			transport:      "http",
 			expectError:    false,
-			expectedOutput: "Starting MCP Firewall server in http mode",
+			expectedOutput: "Starting Aegir server in http mode",
 		},
 		{
 			name:           "SSE mode",
 			transport:      "sse",
 			expectError:    false,
-			expectedOutput: "Starting MCP Firewall server in sse mode",
+			expectedOutput: "Starting Aegir server in sse mode",
 		},
 		{
 			name:           "STDIO mode",
 			transport:      "stdio",
 			expectError:    false,
-			expectedOutput: "Starting MCP Firewall in STDIO mode",
+			expectedOutput: "Starting Aegir in STDIO mode",
 		},
 		{
 			name:          "Invalid mode",
@@ -51,15 +51,15 @@ func TestTransportModeSelection(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Build the binary for testing
-			cmd := exec.Command("go", "build", "-o", "test-mcp-firewall", ".")
+			cmd := exec.Command("go", "build", "-o", "test-aegir", ".")
 			cmd.Dir = "../../"
 			if err := cmd.Run(); err != nil {
 				t.Fatalf("Failed to build test binary: %v", err)
 			}
-			defer os.Remove("../../test-mcp-firewall")
+			defer os.Remove("../../test-aegir")
 
 			// Prepare command with transport flag
-			args := []string{"../../test-mcp-firewall", "-transport", tt.transport}
+			args := []string{"../../test-aegir", "-transport", tt.transport}
 
 			// For STDIO mode, provide input to prevent hanging
 			var stdin *bytes.Buffer
@@ -182,19 +182,19 @@ func TestEnvironmentVariableHandling(t *testing.T) {
 			}
 
 			// Build and run the binary with a quick exit
-			cmd := exec.Command("go", "build", "-o", "test-mcp-firewall-env", ".")
+			cmd := exec.Command("go", "build", "-o", "test-aegir-env", ".")
 			cmd.Dir = "../../"
 			if err := cmd.Run(); err != nil {
 				t.Fatalf("Failed to build test binary: %v", err)
 			}
-			defer os.Remove("../../test-mcp-firewall-env")
+			defer os.Remove("../../test-aegir-env")
 
 			// Create context with very short timeout since we just want to test startup
 			ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 			defer cancel()
 
 			// Run with STDIO mode and immediate input to cause quick exit
-			testCmd := exec.CommandContext(ctx, "../../test-mcp-firewall-env", "-transport", "stdio")
+			testCmd := exec.CommandContext(ctx, "../../test-aegir-env", "-transport", "stdio")
 			testCmd.Stdin = strings.NewReader("")  // Empty input causes EOF and exit
 
 			var stderr bytes.Buffer
@@ -251,18 +251,18 @@ func TestTLSConfigurationCreation(t *testing.T) {
 
 func TestGracefulShutdown(t *testing.T) {
 	// Build the binary
-	cmd := exec.Command("go", "build", "-o", "test-mcp-firewall-shutdown", ".")
+	cmd := exec.Command("go", "build", "-o", "test-aegir-shutdown", ".")
 	cmd.Dir = "../../"
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Failed to build test binary: %v", err)
 	}
-	defer os.Remove("../../test-mcp-firewall-shutdown")
+	defer os.Remove("../../test-aegir-shutdown")
 
 	// Start the server in HTTP mode
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	testCmd := exec.CommandContext(ctx, "../../test-mcp-firewall-shutdown", "-transport", "http")
+	testCmd := exec.CommandContext(ctx, "../../test-aegir-shutdown", "-transport", "http")
 
 	var stderr bytes.Buffer
 	testCmd.Stderr = &stderr
@@ -285,7 +285,7 @@ func TestGracefulShutdown(t *testing.T) {
 
 	// Check stderr for shutdown messages
 	stderrStr := stderr.String()
-	if !strings.Contains(stderrStr, "Starting MCP Firewall server in http mode") {
+	if !strings.Contains(stderrStr, "Starting Aegir server in http mode") {
 		t.Error("Expected startup message not found")
 	}
 
