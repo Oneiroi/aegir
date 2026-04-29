@@ -92,9 +92,10 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 		paramsJSON, _ := json.Marshal(req.Params)
 		assessment := p.sessionAnalyzer.AnalyzeMessage(sessionID, userID, string(paramsJSON))
 
-		// Block if threat level is critical or high
-		if assessment.ConversationRisk == "critical" || assessment.ConversationRisk == "high" {
-			p.logger.Warn("MCP request blocked by session analyzer",
+		// Two-tier threat response:
+		// Critical risk (score >= 0.8): Hard block with 403
+		if assessment.ConversationRisk == "critical" {
+			p.logger.Warn("MCP request blocked by session analyzer (CRITICAL)",
 				"session_id", sessionID,
 				"user_id", userID,
 				"threat_score", assessment.CurrentThreatScore,
@@ -105,11 +106,34 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 				Error: &MCPError{
 					Code:    -32000,
 					Message: "Request blocked by threat detection",
-					Data:    fmt.Sprintf("Risk level: %s", assessment.ConversationRisk),
+					Data:    fmt.Sprintf("Risk level: %s (critical)", assessment.ConversationRisk),
 				},
 				ID: req.ID,
 			})
 			return
+		}
+
+		// High risk (score 0.6-0.79): Maximum sanitization, forward with X-Aegir-Risk header
+		if assessment.ConversationRisk == "high" {
+			p.logger.Warn("MCP request forwarded with high risk sanitization",
+				"session_id", sessionID,
+				"user_id", userID,
+				"threat_score", assessment.CurrentThreatScore,
+				"risk_level", assessment.ConversationRisk,
+				"patterns", assessment.AttackPatterns)
+
+			// Apply maximum sanitization to params
+			maxSanitized := p.sanitizer.SanitizeContent(string(paramsJSON)) // Maximum aggressiveness is default
+			if maxSanitized.Sanitized != string(paramsJSON) {
+				var sanitizedParams interface{}
+				if err := json.Unmarshal([]byte(maxSanitized.Sanitized), &sanitizedParams); err == nil {
+					req.Params = sanitizedParams
+				}
+			}
+
+			// Set X-Aegir-Risk header for downstream awareness
+			c.Header("X-Aegir-Risk", "high")
+			c.Header("X-Aegir-Threat-Score", fmt.Sprintf("%.2f", assessment.CurrentThreatScore))
 		}
 	}
 
