@@ -99,7 +99,9 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 				"session_id", sessionID,
 				"user_id", userID,
 				"threat_score", assessment.CurrentThreatScore,
-				"risk_level", assessment.ConversationRisk,
+				"risk_level", "critical",
+				"response_path", "block-with-403",
+				"decision_rationale", fmt.Sprintf("Score %.2f >= 0.8 threshold - immediate block required", assessment.CurrentThreatScore),
 				"patterns", assessment.AttackPatterns)
 
 			c.JSON(http.StatusForbidden, MCPResponse{
@@ -119,7 +121,9 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 				"session_id", sessionID,
 				"user_id", userID,
 				"threat_score", assessment.CurrentThreatScore,
-				"risk_level", assessment.ConversationRisk,
+				"risk_level", "high",
+				"response_path", "sanitize-and-forward-with-header",
+				"decision_rationale", fmt.Sprintf("Score %.2f in 0.6-0.79 range - sanitize and forward with risk header", assessment.CurrentThreatScore),
 				"patterns", assessment.AttackPatterns)
 
 			// Apply maximum sanitization to params
