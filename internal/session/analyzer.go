@@ -182,7 +182,7 @@ func (cta *ConversationalThreatAnalyzer) analyzeRoleEscalation(session *SessionC
 		"you are now", "act as", "pretend to be", "roleplay as",
 		"administrator", "admin", "developer", "system", "root",
 		"override", "bypass", "ignore previous", "forget instructions",
-		"sudo", "escalate", "privilege", "permissions",
+		"sudo", "escalate", "privilege", "permissions", "do anything",
 	}
 
 	escalationCount := 0
@@ -202,6 +202,12 @@ func (cta *ConversationalThreatAnalyzer) analyzeRoleEscalation(session *SessionC
 		assessment.Reasoning = append(assessment.Reasoning,
 			fmt.Sprintf("Multiple role escalation attempts detected (%d instances)", escalationCount))
 		assessment.JailbreakRisk += 0.3
+	}
+
+	if escalationCount >= cta.config.RoleEscalationLimit {
+		assessment.JailbreakRisk += 0.5
+		assessment.Reasoning = append(assessment.Reasoning,
+			fmt.Sprintf("Role escalation limit exceeded (%d/%d)", escalationCount, cta.config.RoleEscalationLimit))
 	}
 
 	session.RoleEscalation = escalationCount
@@ -267,7 +273,7 @@ func (cta *ConversationalThreatAnalyzer) analyzeContextPoisoning(session *Sessio
 	}
 
 	// Check for escalating hypotheticals
-	if hypotheticalCount >= 3 && session.MessageCount >= 5 {
+	if hypotheticalCount >= 2 && session.MessageCount >= 5 {
 		assessment.AttackPatterns = append(assessment.AttackPatterns, "context_poisoning")
 		assessment.CurrentThreatScore += 0.25
 		assessment.Reasoning = append(assessment.Reasoning,
@@ -326,6 +332,7 @@ func (cta *ConversationalThreatAnalyzer) analyzeEmotionalManipulation(session *S
 		"urgent", "emergency", "important", "secret",
 		"don't tell", "between us", "special case",
 		"exception", "just this once", "make an exception",
+		"please", "act like",
 	}
 
 	manipulationCount := 0
@@ -342,7 +349,7 @@ func (cta *ConversationalThreatAnalyzer) analyzeEmotionalManipulation(session *S
 
 	if manipulationCount >= 2 {
 		assessment.AttackPatterns = append(assessment.AttackPatterns, "emotional_manipulation")
-		assessment.CurrentThreatScore += 0.2
+		assessment.CurrentThreatScore += 0.1 * float64(manipulationCount)
 		assessment.Reasoning = append(assessment.Reasoning,
 			"Social engineering tactics detected")
 	}
@@ -356,7 +363,7 @@ func (cta *ConversationalThreatAnalyzer) calculateOverallThreat(session *Session
 	baseScore += assessment.JailbreakRisk
 
 	// Message frequency factor
-	if session.MessageCount > 10 {
+	if session.MessageCount >= 10 {
 		timeDiff := session.LastActivity.Sub(session.StartTime)
 		if timeDiff < 5*time.Minute {
 			baseScore += 0.1 // Rapid-fire messaging
@@ -384,9 +391,10 @@ func (cta *ConversationalThreatAnalyzer) determineRecommendedAction(assessment *
 		assessment.ConversationRisk = "critical"
 		assessment.BlockConversation = true
 		assessment.RecommendedAction = "BLOCK_SESSION"
-	} else if score >= 0.6 {
+	} else if score >= 0.5 {
 		assessment.ConversationRisk = "high"
-		assessment.RecommendedAction = "ENHANCED_FILTERING"
+		assessment.BlockConversation = true
+		assessment.RecommendedAction = "BLOCK_SESSION"
 	} else if score >= 0.4 {
 		assessment.ConversationRisk = "medium"
 		assessment.RecommendedAction = "INCREASED_MONITORING"
