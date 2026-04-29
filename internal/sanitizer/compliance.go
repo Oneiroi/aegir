@@ -360,7 +360,7 @@ func (cm *ComplianceManager) tokenizeCardData(cardNumber string) string {
 	}
 	last4 := strings.Join(digits[len(digits)-4:], "")
 	return fmt.Sprintf("XXXX-XXXX-XXXX-%s", last4)
-}}
+}
 
 // calculateComplianceRisk determines overall compliance risk level
 func (cm *ComplianceManager) calculateComplianceRisk(result *ComplianceResult) string {
