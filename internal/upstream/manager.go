@@ -17,12 +17,13 @@ import (
 
 // ServiceState represents the current state of an upstream service
 type ServiceState struct {
-	Service       *config.UpstreamService
-	Healthy       bool
-	LastCheck     time.Time
-	FailureCount  int
-	CircuitState  CircuitState
-	LastError     error
+	Service          *config.UpstreamService
+	Healthy          bool
+	LastCheck        time.Time
+	FailureCount     int
+	CircuitState     CircuitState
+	LastError        error
+	ActiveConnections int64
 }
 
 // CircuitState represents the circuit breaker state
@@ -185,6 +186,25 @@ func (m *Manager) selectRandom(services []*ServiceState) *ServiceState {
 	return services[rand.Intn(len(services))]
 }
 
+// selectLeastConnections selects the service with the fewest active connections
+func (m *Manager) selectLeastConnections(services []*ServiceState) *ServiceState {
+	if len(services) == 0 {
+		return nil
+	}
+
+	minConns := services[0].ActiveConnections
+	selected := services[0]
+
+	for _, service := range services[1:] {
+		if service.ActiveConnections < minConns {
+			minConns = service.ActiveConnections
+			selected = service
+		}
+	}
+
+	return selected
+}
+
 // forwardWithRetries forwards a request with retry logic
 func (m *Manager) forwardWithRetries(ctx context.Context, service *ServiceState, req *MCPRequest) (*MCPResponse, error) {
 	var lastErr error
@@ -244,6 +264,12 @@ func (m *Manager) forwardWithRetries(ctx context.Context, service *ServiceState,
 
 // forwardRequest forwards a single request to an upstream service
 func (m *Manager) forwardRequest(ctx context.Context, service *ServiceState, req *MCPRequest) (*MCPResponse, error) {
+	// Increment active connections
+	service.ActiveConnections++
+	defer func() {
+		service.ActiveConnections--
+	}()
+	
 	// Create HTTP client with appropriate timeout and TLS settings
 	client := m.createHTTPClient(service)
 

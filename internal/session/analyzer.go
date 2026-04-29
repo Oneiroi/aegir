@@ -1,8 +1,6 @@
 package session
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"regexp"
 	"strings"
@@ -48,12 +46,12 @@ type MessageContext struct {
 
 // AttackPattern defines multi-turn attack signatures
 type AttackPattern struct {
-	Name           string   `json:"name"`
-	Stages         []string `json:"stages"`
-	MinMessages    int      `json:"min_messages"`
-	MaxTimespan    duration `json:"max_timespan"`
-	ThreatLevel    string   `json:"threat_level"`
-	Indicators     []string `json:"indicators"`
+	Name           string        `json:"name"`
+	Stages         []string      `json:"stages"`
+	MinMessages    int           `json:"min_messages"`
+	MaxTimespan    time.Duration `json:"max_timespan"`
+	ThreatLevel    string        `json:"threat_level"`
+	Indicators     []string      `json:"indicators"`
 }
 
 // AnalyzerConfig configures the conversational threat analyzer
@@ -128,15 +126,15 @@ func (cta *ConversationalThreatAnalyzer) AnalyzeMessage(sessionID, userID, conte
 
 	// Log threat assessment
 	if assessment.CurrentThreatScore > cta.config.ThreatThreshold {
-		cta.logger.WithFields(map[string]interface{}{
-			"session_id":         sessionID,
-			"user_id":           userID,
-			"threat_score":      assessment.CurrentThreatScore,
-			"jailbreak_risk":    assessment.JailbreakRisk,
-			"conversation_risk": assessment.ConversationRisk,
-			"attack_patterns":   assessment.AttackPatterns,
-			"message_count":     session.MessageCount,
-		}).Info("SECURITY: Conversational threat detected")
+		cta.logger.Info("SECURITY: Conversational threat detected",
+			"session_id", sessionID,
+			"user_id", userID,
+			"threat_score", assessment.CurrentThreatScore,
+			"jailbreak_risk", assessment.JailbreakRisk,
+			"conversation_risk", assessment.ConversationRisk,
+			"attack_patterns", assessment.AttackPatterns,
+			"message_count", session.MessageCount,
+		)
 	}
 
 	return assessment
@@ -516,4 +514,23 @@ func (cta *ConversationalThreatAnalyzer) GetSessionStats() map[string]interface{
 	}
 
 	return stats
+}
+
+// GetSessionContext retrieves a specific session by ID
+func (cta *ConversationalThreatAnalyzer) GetSessionContext(sessionID string) *SessionContext {
+	cta.mutex.RLock()
+	defer cta.mutex.RUnlock()
+
+	if session, exists := cta.sessions[sessionID]; exists {
+		return session
+	}
+	return nil
+}
+
+// DeleteSession removes a session by ID
+func (cta *ConversationalThreatAnalyzer) DeleteSession(sessionID string) {
+	cta.mutex.Lock()
+	defer cta.mutex.Unlock()
+
+	delete(cta.sessions, sessionID)
 }

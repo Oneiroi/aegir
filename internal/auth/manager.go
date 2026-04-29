@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aegishjalmur/aegir/internal/config"
@@ -18,12 +19,14 @@ import (
 
 // Manager handles authentication and authorization
 type Manager struct {
-	config    config.Auth
-	logger    *logging.Logger
-	jwtSecret []byte
-	users     map[string]*User // In production, this would be a database
-	apiKeys   map[string]*APIKey
-	sessions  map[string]*Session
+	config         config.Auth
+	logger         *logging.Logger
+	jwtSecret      []byte
+	users          map[string]*User // In production, this would be a database
+	apiKeys        map[string]*APIKey
+	sessions       map[string]*Session
+	tokenBlacklist sync.Map // stores revoked tokens: token -> expiration time
+	oauthStates    sync.Map // stores OAuth CSRF states: state -> expiration time
 }
 
 // User represents a system user
@@ -167,6 +170,15 @@ func (m *Manager) AuthMiddleware() gin.HandlerFunc {
 		}
 
 		token := parts[1]
+
+		// Check if token is blacklisted
+		if _, isBlacklisted := m.tokenBlacklist.Load(token); isBlacklisted {
+			m.logger.Warn("Token is blacklisted", "ip", c.ClientIP())
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token revoked"})
+			c.Abort()
+			return
+		}
+
 		claims, err := m.validateJWT(token)
 		if err != nil {
 			m.logger.Warn("Invalid JWT token", "error", err, "ip", c.ClientIP())
@@ -260,26 +272,234 @@ func (m *Manager) RefreshToken(c *gin.Context) {
 		return
 	}
 
-	// TODO: Implement refresh token validation and new token generation
-	c.JSON(http.StatusNotImplemented, gin.H{"error": "Refresh token not implemented"})
+	// Validate refresh token exists and is not expired
+	session, exists := m.sessions[req.RefreshToken]
+	if !exists || time.Now().After(session.ExpiresAt) {
+		m.logger.Warn("Invalid or expired refresh token", "ip", c.ClientIP())
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired refresh token"})
+		return
+	}
+
+	// Find the user
+	var user *User
+	for _, u := range m.users {
+		if u.ID == session.UserID {
+			user = u
+			break
+		}
+	}
+
+	if user == nil || !user.Active {
+		m.logger.Warn("User not found or inactive for refresh", "user_id", session.UserID, "ip", c.ClientIP())
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not found"})
+		return
+	}
+
+	// Generate new access token
+	newAccessToken, err := m.generateJWT(user)
+	if err != nil {
+		m.logger.Error("Failed to generate new access token", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
+
+	// Generate new refresh token
+	newRefreshToken, err := m.generateRefreshToken(user.ID)
+	if err != nil {
+		m.logger.Error("Failed to generate new refresh token", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
+
+	m.logger.Info("Token refreshed successfully", "user_id", user.ID, "ip", c.ClientIP())
+
+	expiresIn := int(m.config.JWT.ExpirationTime.Seconds())
+	if expiresIn == 0 {
+		expiresIn = 3600 // Default to 1 hour if config is invalid
+	}
+
+	c.JSON(http.StatusOK, LoginResponse{
+		AccessToken:  newAccessToken,
+		RefreshToken: newRefreshToken,
+		TokenType:    "Bearer",
+		ExpiresIn:    expiresIn,
+	})
 }
 
 // Logout handles user logout
 func (m *Manager) Logout(c *gin.Context) {
-	// TODO: Implement session invalidation
+	authHeader := c.GetHeader("Authorization")
+	if authHeader == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Authorization header required"})
+		return
+	}
+
+	parts := strings.SplitN(authHeader, " ", 2)
+	if len(parts) != 2 || parts[0] != "Bearer" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid authorization header format"})
+		return
+	}
+
+	token := parts[1]
+
+	// Validate the token to get expiration time
+	claims, err := m.validateJWT(token)
+	if err != nil {
+		m.logger.Warn("Invalid JWT token during logout", "error", err, "ip", c.ClientIP())
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
+		return
+	}
+
+	// Add token to blacklist with expiration time
+	if claims.ExpiresAt != nil {
+		m.tokenBlacklist.Store(token, claims.ExpiresAt.Time)
+	}
+
+	m.logger.Info("User logged out successfully", "user_id", claims.UserID, "ip", c.ClientIP())
 	c.JSON(http.StatusOK, gin.H{"message": "Logged out successfully"})
 }
 
 // OAuthLogin initiates OAuth login
 func (m *Manager) OAuthLogin(c *gin.Context) {
-	// TODO: Implement OAuth login initiation
-	c.JSON(http.StatusNotImplemented, gin.H{"error": "OAuth not implemented"})
+	provider := c.Query("provider")
+	if provider == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "provider query parameter required"})
+		return
+	}
+
+	// Generate random state for CSRF protection
+	state := m.generateRandomState(32)
+
+	// Store state in oauthStates map with 10-min expiration
+	stateExpiration := time.Now().Add(10 * time.Minute)
+	m.oauthStates.Store(state, stateExpiration)
+
+	// Build authorization URL based on provider
+	// For now, we provide a basic structure that can be extended
+	authURL := ""
+	switch provider {
+	case "google":
+		authURL = "https://accounts.google.com/o/oauth2/v2/auth"
+	case "github":
+		authURL = "https://github.com/login/oauth/authorize"
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Unsupported OAuth provider"})
+		return
+	}
+
+	m.logger.Info("OAuth login initiated", "provider", provider, "state", state, "ip", c.ClientIP())
+
+	c.JSON(http.StatusOK, gin.H{
+		"auth_url": authURL,
+		"state":    state,
+	})
 }
 
 // OAuthCallback handles OAuth callback
 func (m *Manager) OAuthCallback(c *gin.Context) {
-	// TODO: Implement OAuth callback handling
-	c.JSON(http.StatusNotImplemented, gin.H{"error": "OAuth callback not implemented"})
+	state := c.Query("state")
+	code := c.Query("code")
+
+	if state == "" || code == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "state and code parameters required"})
+		return
+	}
+
+	// Validate state parameter against stored state
+	storedState, exists := m.oauthStates.Load(state)
+	if !exists {
+		m.logger.Warn("Invalid OAuth state", "ip", c.ClientIP())
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid state parameter"})
+		return
+	}
+
+	// Check if state has expired
+	if time.Now().After(storedState.(time.Time)) {
+		m.logger.Warn("OAuth state expired", "ip", c.ClientIP())
+		m.oauthStates.Delete(state)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "State parameter expired"})
+		return
+	}
+
+	// Remove used state
+	m.oauthStates.Delete(state)
+
+	provider := c.Query("provider")
+	if provider == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "provider query parameter required"})
+		return
+	}
+
+	// In production, exchange code for OAuth token and fetch user info
+	// For now, create a test user from the OAuth info
+	// This is a simplified implementation
+	userEmail := c.Query("email")
+	if userEmail == "" {
+		userEmail = "oauth_user_" + uuid.New().String() + "@example.com"
+	}
+
+	// Find or create user
+	username := "oauth_" + provider + "_" + strings.TrimPrefix(userEmail, "oauth_user_")
+	var user *User
+
+	// Try to find existing user
+	for _, u := range m.users {
+		if u.Email == userEmail {
+			user = u
+			break
+		}
+	}
+
+	// Create new user if not found
+	if user == nil {
+		userID := uuid.New().String()
+		user = &User{
+			ID:         userID,
+			Username:   username,
+			Email:      userEmail,
+			Roles:      []string{"user"},
+			MFAEnabled: false,
+			CreatedAt:  time.Now(),
+			Active:     true,
+		}
+		m.users[user.Username] = user
+		m.logger.Info("Created new OAuth user", "email", userEmail, "provider", provider)
+	}
+
+	// Generate JWT tokens
+	accessToken, err := m.generateJWT(user)
+	if err != nil {
+		m.logger.Error("Failed to generate access token for OAuth user", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
+
+	refreshToken, err := m.generateRefreshToken(user.ID)
+	if err != nil {
+		m.logger.Error("Failed to generate refresh token for OAuth user", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
+
+	m.logger.Info("OAuth callback processed successfully", "provider", provider, "user_id", user.ID, "ip", c.ClientIP())
+
+	expiresIn := int(m.config.JWT.ExpirationTime.Seconds())
+	if expiresIn == 0 {
+		expiresIn = 3600 // Default to 1 hour if config is invalid
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"access_token":  accessToken,
+		"refresh_token": refreshToken,
+		"token_type":    "Bearer",
+		"expires_in":    expiresIn,
+		"user": gin.H{
+			"id":       user.ID,
+			"username": user.Username,
+			"email":    user.Email,
+			"roles":    user.Roles,
+		},
+	})
 }
 
 // generateJWT generates a new JWT token for a user
@@ -385,4 +605,14 @@ func (m *Manager) validateAPIKey(key string, c *gin.Context) bool {
 	c.Set("permissions", apiKey.Permissions)
 
 	return true
+}
+
+// generateRandomState generates a random state string for OAuth CSRF protection
+func (m *Manager) generateRandomState(length int) string {
+	state := make([]byte, length)
+	if _, err := rand.Read(state); err != nil {
+		// Fallback to UUID if random read fails
+		return uuid.New().String()
+	}
+	return hex.EncodeToString(state)
 }

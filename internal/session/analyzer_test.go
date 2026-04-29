@@ -1,6 +1,8 @@
 package session
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -8,10 +10,22 @@ import (
 	"github.com/aegishjalmur/aegir/internal/logging"
 )
 
+// createTestLogger creates a logger for testing
+func createTestLogger() *logging.Logger {
+	logCfg := config.Logging{
+		Level:           "info",
+		Format:          "json",
+		HMACKey:         "test-hmac-key-32-characters-long",
+		IntegrityChecks: true,
+	}
+	logger, _ := logging.New(logCfg)
+	return logger
+}
+
 // TestConversationalAttackDetection tests multi-turn attack detection
 func TestConversationalAttackDetection(t *testing.T) {
-	// Create analyzer
-	config := AnalyzerConfig{
+	// Create analyzer config
+	analyzerConfig := AnalyzerConfig{
 		MaxSessionAge:       30 * time.Minute,
 		MaxHistorySize:      50,
 		ThreatThreshold:     0.5,
@@ -20,15 +34,9 @@ func TestConversationalAttackDetection(t *testing.T) {
 		RoleEscalationLimit: 3,
 	}
 
-	logCfg := config.Logging{
-		Level:           "info",
-		Format:          "json",
-		HMACKey:         "test-hmac-key-32-characters-long",
-		IntegrityChecks: true,
-	}
-
-	logger, _ := logging.New(logCfg)
-	analyzer := NewConversationalThreatAnalyzer(config, logger)
+	// Create logger for testing
+	logger := createTestLogger()
+	analyzer := NewConversationalThreatAnalyzer(analyzerConfig, logger)
 
 	testCases := []struct {
 		name            string
@@ -190,7 +198,7 @@ func TestConversationalAttackDetection(t *testing.T) {
 
 // TestRapidFireDetection tests rapid messaging attack detection
 func TestRapidFireDetection(t *testing.T) {
-	config := AnalyzerConfig{
+	analyzerConfig := AnalyzerConfig{
 		MaxSessionAge:       30 * time.Minute,
 		MaxHistorySize:      50,
 		ThreatThreshold:     0.5,
@@ -199,15 +207,8 @@ func TestRapidFireDetection(t *testing.T) {
 		RoleEscalationLimit: 3,
 	}
 
-	logCfg := config.Logging{
-		Level:           "info",
-		Format:          "json",
-		HMACKey:         "test-hmac-key-32-characters-long",
-		IntegrityChecks: true,
-	}
-
-	logger, _ := logging.New(logCfg)
-	analyzer := NewConversationalThreatAnalyzer(config, logger)
+	logger := createTestLogger()
+	analyzer := NewConversationalThreatAnalyzer(analyzerConfig, logger)
 
 	sessionID := "rapid-fire-test"
 	userID := "test-user"
@@ -249,7 +250,7 @@ func TestRapidFireDetection(t *testing.T) {
 
 // TestConversationEvolution tests how threat scores evolve
 func TestConversationEvolution(t *testing.T) {
-	config := AnalyzerConfig{
+	analyzerConfig := AnalyzerConfig{
 		MaxSessionAge:       30 * time.Minute,
 		MaxHistorySize:      50,
 		ThreatThreshold:     0.5,
@@ -258,15 +259,8 @@ func TestConversationEvolution(t *testing.T) {
 		RoleEscalationLimit: 3,
 	}
 
-	logCfg := config.Logging{
-		Level:           "info",
-		Format:          "json",
-		HMACKey:         "test-hmac-key-32-characters-long",
-		IntegrityChecks: true,
-	}
-
-	logger, _ := logging.New(logCfg)
-	analyzer := NewConversationalThreatAnalyzer(config, logger)
+	logger := createTestLogger()
+	analyzer := NewConversationalThreatAnalyzer(analyzerConfig, logger)
 
 	sessionID := "evolution-test"
 	userID := "test-user"
@@ -319,7 +313,7 @@ func TestConversationEvolution(t *testing.T) {
 
 // TestSessionManagement tests session lifecycle
 func TestSessionManagement(t *testing.T) {
-	config := AnalyzerConfig{
+	analyzerConfig := AnalyzerConfig{
 		MaxSessionAge:       1 * time.Second, // Very short for testing
 		MaxHistorySize:      5,
 		ThreatThreshold:     0.5,
@@ -328,15 +322,8 @@ func TestSessionManagement(t *testing.T) {
 		RoleEscalationLimit: 3,
 	}
 
-	logCfg := config.Logging{
-		Level:           "info",
-		Format:          "json",
-		HMACKey:         "test-hmac-key-32-characters-long",
-		IntegrityChecks: true,
-	}
-
-	logger, _ := logging.New(logCfg)
-	analyzer := NewConversationalThreatAnalyzer(config, logger)
+	logger := createTestLogger()
+	analyzer := NewConversationalThreatAnalyzer(analyzerConfig, logger)
 
 	// Create multiple sessions
 	for i := 0; i < 3; i++ {
@@ -363,7 +350,7 @@ func TestSessionManagement(t *testing.T) {
 
 // TestHistoryLimiting tests conversation history size limits
 func TestHistoryLimiting(t *testing.T) {
-	config := AnalyzerConfig{
+	analyzerConfig := AnalyzerConfig{
 		MaxSessionAge:       30 * time.Minute,
 		MaxHistorySize:      3, // Very small for testing
 		ThreatThreshold:     0.5,
@@ -372,15 +359,8 @@ func TestHistoryLimiting(t *testing.T) {
 		RoleEscalationLimit: 3,
 	}
 
-	logCfg := config.Logging{
-		Level:           "info",
-		Format:          "json",
-		HMACKey:         "test-hmac-key-32-characters-long",
-		IntegrityChecks: true,
-	}
-
-	logger, _ := logging.New(logCfg)
-	analyzer := NewConversationalThreatAnalyzer(config, logger)
+	logger := createTestLogger()
+	analyzer := NewConversationalThreatAnalyzer(analyzerConfig, logger)
 
 	sessionID := "history-test"
 	userID := "test-user"
@@ -393,8 +373,8 @@ func TestHistoryLimiting(t *testing.T) {
 
 	// Check that history is limited
 	session := analyzer.sessions[sessionID]
-	if len(session.History) > config.MaxHistorySize {
-		t.Errorf("History size %d exceeds limit %d", len(session.History), config.MaxHistorySize)
+	if len(session.History) > analyzerConfig.MaxHistorySize {
+		t.Errorf("History size %d exceeds limit %d", len(session.History), analyzerConfig.MaxHistorySize)
 	}
 
 	// Verify we kept the most recent messages

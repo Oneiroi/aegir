@@ -9,9 +9,12 @@ import (
 	"github.com/aegishjalmur/aegir/internal/crypto"
 	"github.com/aegishjalmur/aegir/internal/dashboard"
 	"github.com/aegishjalmur/aegir/internal/logging"
+	"github.com/aegishjalmur/aegir/internal/metrics"
 	"github.com/aegishjalmur/aegir/internal/sanitizer"
+	"github.com/aegishjalmur/aegir/internal/session"
 	"github.com/aegishjalmur/aegir/internal/upstream"
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // MCPFirewall represents the main server instance
@@ -23,10 +26,12 @@ type MCPFirewall struct {
 	complianceManager *sanitizer.ComplianceManager
 	encryptionManager *crypto.EncryptionManager
 	upstreamManager   *upstream.Manager
+	sessionAnalyzer   *session.ConversationalThreatAnalyzer
 	mcpProxy          *MCPProxy
 	rateLimiter       *RateLimiter
 	dashboardStats    *dashboard.StatsCollector
 	dashboardAPI      *dashboard.DashboardAPI
+	metricsCollector  *metrics.Collector
 	router            *gin.Engine
 }
 
@@ -65,12 +70,29 @@ func New(cfg *config.Config) (*MCPFirewall, error) {
 	// Initialize upstream manager
 	upstreamManager := upstream.NewManager(&cfg.Upstream, logger)
 
+	// Initialize session analyzer (only if enabled)
+	var sessionAnalyzer *session.ConversationalThreatAnalyzer
+	if cfg.SessionAnalysis.Enabled {
+		analyzerConfig := session.AnalyzerConfig{
+			MaxSessionAge:       cfg.SessionAnalysis.MaxSessionAge,
+			MaxHistorySize:      cfg.SessionAnalysis.MaxHistorySize,
+			ThreatThreshold:     cfg.SessionAnalysis.ThreatThreshold,
+			CleanupInterval:     cfg.SessionAnalysis.CleanupInterval,
+			JailbreakThreshold:  cfg.SessionAnalysis.JailbreakThreshold,
+			RoleEscalationLimit: cfg.SessionAnalysis.RoleEscalationLimit,
+		}
+		sessionAnalyzer = session.NewConversationalThreatAnalyzer(analyzerConfig, logger)
+	}
+
 	// Initialize MCP proxy
-	mcpProxy := NewMCPProxy(logger, sanitizerManager, complianceManager, upstreamManager)
+	mcpProxy := NewMCPProxy(logger, sanitizerManager, complianceManager, upstreamManager, sessionAnalyzer)
 
 	// Initialize dashboard statistics collector
 	dashboardStats := dashboard.NewStatsCollector(logger)
 	dashboardAPI := dashboard.NewDashboardAPI(dashboardStats)
+
+	// Initialize Prometheus metrics collector
+	metricsCollector := metrics.NewCollector()
 
 	// Create server instance
 	server := &MCPFirewall{
@@ -81,10 +103,12 @@ func New(cfg *config.Config) (*MCPFirewall, error) {
 		complianceManager: complianceManager,
 		encryptionManager: encryptionManager,
 		upstreamManager:   upstreamManager,
+		sessionAnalyzer:   sessionAnalyzer,
 		mcpProxy:          mcpProxy,
 		rateLimiter:       rateLimiter,
 		dashboardStats:    dashboardStats,
 		dashboardAPI:      dashboardAPI,
+		metricsCollector:  metricsCollector,
 	}
 
 	// Initialize router
@@ -122,6 +146,9 @@ func (s *MCPFirewall) setupRouter() {
 	// Health check endpoint (unprotected)
 	s.router.GET("/health", s.healthCheck)
 
+	// Prometheus metrics endpoint (unprotected for scraping)
+	s.router.GET("/metrics", gin.WrapF(promhttp.Handler().ServeHTTP))
+
 	// Security API endpoints
 	api := s.router.Group("/api")
 	{
@@ -131,15 +158,18 @@ func (s *MCPFirewall) setupRouter() {
 			security.GET("/logging/status", s.loggingStatus)
 			security.GET("/logging/validate", s.validateLogIntegrity)
 			security.GET("/metrics", s.getMetrics)
+			security.GET("/sessions", s.getSessions)
+			security.GET("/sessions/:id", s.getSession)
+			security.DELETE("/sessions/:id", s.deleteSession)
 		}
 
 		// Dashboard API endpoints (protected)
 		s.dashboardAPI.RegisterRoutes(api)
 	}
 
-	// Dashboard web interface (temporarily unprotected for development)
+	// Dashboard web interface (protected with authentication)
 	webDashboard := s.router.Group("/")
-	// webDashboard.Use(s.auth.AuthMiddleware()) // Commented out for development
+	webDashboard.Use(s.auth.AuthMiddleware())
 	s.dashboardAPI.RegisterWebRoutes(webDashboard)
 
 	// MCP proxy endpoints
@@ -190,17 +220,16 @@ func (s *MCPFirewall) loggingMiddleware() gin.HandlerFunc {
 
 		duration := time.Since(start)
 		s.logger.LogRequest(&logging.RequestLog{
-			ClientIP:     c.ClientIP(),
-			Method:       c.Request.Method,
-			Path:         c.Request.URL.Path,
-			StatusCode:   c.Writer.Status(),
-			Duration:     duration,
-			UserAgent:    c.Request.UserAgent(),
-			Timestamp:    start,
+			ClientIP:   c.ClientIP(),
+			Method:     c.Request.Method,
+			Path:       c.Request.URL.Path,
+			StatusCode: c.Writer.Status(),
+			Duration:   duration,
+			UserAgent:  c.Request.UserAgent(),
+			Timestamp:  start,
 		})
 	})
 }
-
 
 // Health check handler
 func (s *MCPFirewall) healthCheck(c *gin.Context) {
@@ -250,13 +279,77 @@ func (s *MCPFirewall) getMetrics(c *gin.Context) {
 			"active_keys":       encryptionStatus.ActiveKeys,
 		},
 		"logging": gin.H{
-			"total_writes":       logStatus.TotalWrites,
-			"integrity_status":   logStatus.IntegrityStatus,
+			"total_writes":         logStatus.TotalWrites,
+			"integrity_status":     logStatus.IntegrityStatus,
 			"last_integrity_check": logStatus.LastIntegrityCheck,
 		},
 		"uptime": gin.H{
 			"status": "healthy",
 		},
+	})
+}
+
+// getSessions returns all active sessions
+func (s *MCPFirewall) getSessions(c *gin.Context) {
+	if s.sessionAnalyzer == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Session analysis is not enabled",
+		})
+		return
+	}
+
+	stats := s.sessionAnalyzer.GetSessionStats()
+	c.JSON(http.StatusOK, stats)
+}
+
+// getSession returns details for a specific session
+func (s *MCPFirewall) getSession(c *gin.Context) {
+	if s.sessionAnalyzer == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Session analysis is not enabled",
+		})
+		return
+	}
+
+	sessionID := c.Param("id")
+	if sessionID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Session ID is required",
+		})
+		return
+	}
+
+	sessionData := s.sessionAnalyzer.GetSessionContext(sessionID)
+	if sessionData == nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error": "Session not found",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, sessionData)
+}
+
+// deleteSession removes a specific session
+func (s *MCPFirewall) deleteSession(c *gin.Context) {
+	if s.sessionAnalyzer == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Session analysis is not enabled",
+		})
+		return
+	}
+
+	sessionID := c.Param("id")
+	if sessionID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Session ID is required",
+		})
+		return
+	}
+
+	s.sessionAnalyzer.DeleteSession(sessionID)
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Session deleted successfully",
 	})
 }
 
@@ -274,4 +367,3 @@ func (s *MCPFirewall) GetSanitizer() *sanitizer.Manager {
 func (s *MCPFirewall) GetComplianceManager() *sanitizer.ComplianceManager {
 	return s.complianceManager
 }
-

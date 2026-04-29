@@ -13,6 +13,7 @@ import (
 	"github.com/aegishjalmur/aegir/internal/config"
 	"github.com/aegishjalmur/aegir/internal/logging"
 	"github.com/aegishjalmur/aegir/internal/sanitizer"
+	"github.com/aegishjalmur/aegir/internal/session"
 	"github.com/aegishjalmur/aegir/internal/upstream"
 	"github.com/gin-gonic/gin"
 )
@@ -47,7 +48,18 @@ func createTestMCPProxy() *MCPProxy {
 	upstreamCfg := &config.Upstream{}
 	upstreamMgr := upstream.NewManager(upstreamCfg, logger)
 
-	return NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr)
+	// Create test session analyzer
+	sessionCfg := session.AnalyzerConfig{
+		MaxSessionAge:       30 * time.Minute,
+		MaxHistorySize:      50,
+		ThreatThreshold:     0.5,
+		CleanupInterval:     5 * time.Minute,
+		JailbreakThreshold:  0.6,
+		RoleEscalationLimit: 3,
+	}
+	sessionAnalyzer := session.NewConversationalThreatAnalyzer(sessionCfg, logger)
+
+	return NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, sessionAnalyzer)
 }
 
 func TestMCPInitialize(t *testing.T) {

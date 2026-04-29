@@ -1,9 +1,11 @@
 package logging
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +16,45 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// writeMetrics tracks write operations with sliding window timing
+type writeMetrics struct {
+	mu          sync.Mutex
+	writeStamps []time.Time // Timestamps of writes in the last 60 seconds
+}
+
+// recordWrite records a write timestamp
+func (wm *writeMetrics) recordWrite() {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+
+	now := time.Now()
+	// Remove timestamps older than 60 seconds
+	cutoff := now.Add(-60 * time.Second)
+	for len(wm.writeStamps) > 0 && wm.writeStamps[0].Before(cutoff) {
+		wm.writeStamps = wm.writeStamps[1:]
+	}
+	// Add new timestamp
+	wm.writeStamps = append(wm.writeStamps, now)
+}
+
+// getWritesPerSecond calculates the rate of writes from the last 60 seconds
+func (wm *writeMetrics) getWritesPerSecond() float64 {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+
+	if len(wm.writeStamps) == 0 {
+		return 0
+	}
+
+	// Calculate time span from first to last write
+	timeSpan := wm.writeStamps[len(wm.writeStamps)-1].Sub(wm.writeStamps[0])
+	if timeSpan.Seconds() == 0 {
+		return float64(len(wm.writeStamps))
+	}
+
+	return float64(len(wm.writeStamps)) / timeSpan.Seconds()
+}
+
 // Logger provides secure logging with HMAC integrity
 type Logger struct {
 	logger     *logrus.Logger
@@ -22,6 +63,9 @@ type Logger struct {
 	file       *os.File
 	mutex      sync.Mutex
 	sequenceID uint64
+	metrics    *writeMetrics
+	integrityStatus string
+	lastIntegrityCheck time.Time
 }
 
 // RequestLog represents a request log entry
@@ -37,35 +81,35 @@ type RequestLog struct {
 
 // SecurityEvent represents a security-related log entry
 type SecurityEvent struct {
-	Type        string            `json:"type"`
-	Severity    string            `json:"severity"`
-	Message     string            `json:"message"`
-	ClientIP    string            `json:"client_ip,omitempty"`
-	UserID      string            `json:"user_id,omitempty"`
-	Details     map[string]string `json:"details,omitempty"`
-	Timestamp   time.Time         `json:"timestamp"`
+	Type      string            `json:"type"`
+	Severity  string            `json:"severity"`
+	Message   string            `json:"message"`
+	ClientIP  string            `json:"client_ip,omitempty"`
+	UserID    string            `json:"user_id,omitempty"`
+	Details   map[string]string `json:"details,omitempty"`
+	Timestamp time.Time         `json:"timestamp"`
 }
 
 // LogStatus represents the current status of the logging system
 type LogStatus struct {
-	Enabled         bool    `json:"enabled"`
-	LogLevel        string  `json:"log_level"`
-	LogFile         string  `json:"log_file"`
-	WritesPerSecond float64 `json:"writes_per_second"`
-	TotalWrites     uint64  `json:"total_writes"`
-	IntegrityStatus string  `json:"integrity_status"`
+	Enabled            bool      `json:"enabled"`
+	LogLevel           string    `json:"log_level"`
+	LogFile            string    `json:"log_file"`
+	WritesPerSecond    float64   `json:"writes_per_second"`
+	TotalWrites        uint64    `json:"total_writes"`
+	IntegrityStatus    string    `json:"integrity_status"`
 	LastIntegrityCheck time.Time `json:"last_integrity_check"`
 }
 
 // IntegrityResult represents the result of log integrity validation
 type IntegrityResult struct {
-	Valid           bool      `json:"valid"`
-	TotalEntries    int       `json:"total_entries"`
-	ValidEntries    int       `json:"valid_entries"`
-	InvalidEntries  int       `json:"invalid_entries"`
-	MissingEntries  []uint64  `json:"missing_entries,omitempty"`
-	ValidationTime  time.Time `json:"validation_time"`
-	Details         string    `json:"details"`
+	Valid          bool      `json:"valid"`
+	TotalEntries   int       `json:"total_entries"`
+	ValidEntries   int       `json:"valid_entries"`
+	InvalidEntries int       `json:"invalid_entries"`
+	MissingEntries []uint64  `json:"missing_entries,omitempty"`
+	ValidationTime time.Time `json:"validation_time"`
+	Details        string    `json:"details"`
 }
 
 // New creates a new secure logger instance
@@ -113,11 +157,14 @@ func New(config config.Logging) (*Logger, error) {
 		return nil, fmt.Errorf("HMAC key must be at least 32 characters long")
 	}
 
+	now := time.Now()
 	l := &Logger{
-		logger:  logger,
-		config:  config,
-		hmacKey: hmacKey,
+		logger:     logger,
+		config:     config,
 		sequenceID: 0,
+		metrics:    &writeMetrics{},
+		integrityStatus: "healthy",
+		lastIntegrityCheck: now,
 	}
 
 	return l, nil
@@ -125,16 +172,19 @@ func New(config config.Logging) (*Logger, error) {
 
 // Info logs an info message
 func (l *Logger) Info(msg string, fields ...interface{}) {
+	l.metrics.recordWrite()
 	l.logWithIntegrity(logrus.InfoLevel, msg, fields...)
 }
 
 // Warn logs a warning message
 func (l *Logger) Warn(msg string, fields ...interface{}) {
+	l.metrics.recordWrite()
 	l.logWithIntegrity(logrus.WarnLevel, msg, fields...)
 }
 
 // Error logs an error message
 func (l *Logger) Error(msg string, fields ...interface{}) {
+	l.metrics.recordWrite()
 	l.logWithIntegrity(logrus.ErrorLevel, msg, fields...)
 }
 
@@ -237,10 +287,10 @@ func (l *Logger) GetStatus() *LogStatus {
 		Enabled:            true,
 		LogLevel:           l.config.Level,
 		LogFile:            l.config.File,
-		WritesPerSecond:    0, // TODO: Implement actual metrics
+		WritesPerSecond:    l.metrics.getWritesPerSecond(),
 		TotalWrites:        l.sequenceID,
-		IntegrityStatus:    "healthy",
-		LastIntegrityCheck: time.Now(),
+		IntegrityStatus:    l.integrityStatus,
+		LastIntegrityCheck: l.lastIntegrityCheck,
 	}
 }
 
@@ -248,8 +298,8 @@ func (l *Logger) GetStatus() *LogStatus {
 func (l *Logger) ValidateIntegrity() *IntegrityResult {
 	result := &IntegrityResult{
 		ValidationTime: time.Now(),
-		Valid:         true,
-		Details:       "Log integrity validation completed successfully",
+		Valid:          true,
+		Details:        "Log integrity validation completed successfully",
 	}
 
 	if !l.config.IntegrityChecks {
@@ -257,17 +307,102 @@ func (l *Logger) ValidateIntegrity() *IntegrityResult {
 		return result
 	}
 
-	// TODO: Implement actual log file parsing and HMAC validation
-	// This would involve:
-	// 1. Reading the log file
-	// 2. Parsing each log entry
-	// 3. Extracting the HMAC signature and data
-	// 4. Recalculating HMAC and comparing
-	// 5. Checking for missing sequence IDs
+	if l.config.File == "" {
+		result.Details = "No log file configured"
+		return result
+	}
 
-	result.TotalEntries = int(l.sequenceID)
-	result.ValidEntries = int(l.sequenceID)
-	result.InvalidEntries = 0
+	// Read the log file
+	data, err := os.ReadFile(l.config.File)
+	if err != nil {
+		result.Valid = false
+		result.Details = fmt.Sprintf("Failed to read log file: %v", err)
+		return result
+	}
+
+	lines := []string{}
+	// Split by newlines to parse JSON entries
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		if len(line) > 0 {
+			lines = append(lines, string(line))
+		}
+	}
+
+	result.TotalEntries = len(lines)
+
+	// Track expected sequence IDs
+	expectedSeqID := uint64(1)
+	missingIDs := []uint64{}
+	validCount := 0
+	invalidCount := 0
+
+	for _, line := range lines {
+		// Parse JSON log entry
+		var entry map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			invalidCount++
+			continue
+		}
+
+		// Extract sequence ID
+		seqIDFloat, ok := entry["sequence_id"].(float64)
+		if !ok {
+			invalidCount++
+			continue
+		}
+		seqID := uint64(seqIDFloat)
+
+		// Check for gaps
+		if seqID > expectedSeqID {
+			for i := expectedSeqID; i < seqID; i++ {
+				missingIDs = append(missingIDs, i)
+			}
+			expectedSeqID = seqID + 1
+		} else if seqID == expectedSeqID {
+			expectedSeqID++
+		}
+
+		// Validate HMAC signature
+		hmacSig, ok := entry["hmac_signature"].(string)
+		if !ok {
+			invalidCount++
+			continue
+		}
+
+		logTimestamp, ok := entry["log_timestamp"].(string)
+		if !ok {
+			invalidCount++
+			continue
+		}
+
+		msg := entry["msg"]
+		if msg == nil {
+			msg = ""
+		}
+
+		// Reconstruct data string for HMAC validation
+		dataString := fmt.Sprintf("%s|%d|%v", logTimestamp, seqID, msg)
+		expectedSig := l.calculateHMAC(dataString)
+
+		if hmacSig == expectedSig {
+			validCount++
+		} else {
+			invalidCount++
+		}
+	}
+
+	result.ValidEntries = validCount
+	result.InvalidEntries = invalidCount
+	result.MissingEntries = missingIDs
+
+	if invalidCount > 0 || len(missingIDs) > 0 {
+		result.Valid = false
+		result.Details = fmt.Sprintf("Validation found %d invalid entries and %d missing entries", invalidCount, len(missingIDs))
+		l.integrityStatus = "degraded"
+	} else {
+		l.integrityStatus = "healthy"
+	}
+	l.lastIntegrityCheck = time.Now()
 
 	return result
 }

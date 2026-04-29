@@ -1,6 +1,7 @@
 package sanitizer
 
 import (
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -308,11 +309,14 @@ func (cm *ComplianceManager) detectPCI(result *ComplianceResult) *ComplianceResu
 		}
 
 		// Redact or tokenize card data if configured
-		replacement := "CARD_DATA_REDACTED"
 		if cm.config.PCI.TokenizeCards {
-			replacement = cm.tokenizeCardData(patternName)
+			// Use function-based replacement to pass matched text
+			content = re.ReplaceAllStringFunc(content, func(match string) string {
+				return cm.tokenizeCardData(match)
+			})
+		} else {
+			content = re.ReplaceAllString(content, "CARD_DATA_REDACTED")
 		}
-		content = re.ReplaceAllString(content, replacement)
 	}
 
 	result.Sanitized = content
@@ -348,18 +352,15 @@ func (cm *ComplianceManager) isValidCreditCard(cardNumber string) bool {
 }
 
 // tokenizeCardData creates a format-preserving token for card data
-func (cm *ComplianceManager) tokenizeCardData(dataType string) string {
-	switch dataType {
-	case "visa", "mastercard", "amex", "discover":
-		return "XXXX-XXXX-XXXX-1234" // Show last 4 digits as placeholder
-	case "cvv":
-		return "XXX"
-	case "exp_date":
-		return "XX/XX"
-	default:
-		return "TOKENIZED_" + strings.ToUpper(dataType)
+func (cm *ComplianceManager) tokenizeCardData(cardNumber string) string {
+	// Extract last 4 digits
+	digits := regexp.MustCompile(`\d`).FindAllString(cardNumber, -1)
+	if len(digits) < 4 {
+		return "XXXX-XXXX-XXXX-XXXX"
 	}
-}
+	last4 := strings.Join(digits[len(digits)-4:], "")
+	return fmt.Sprintf("XXXX-XXXX-XXXX-%s", last4)
+}}
 
 // calculateComplianceRisk determines overall compliance risk level
 func (cm *ComplianceManager) calculateComplianceRisk(result *ComplianceResult) string {

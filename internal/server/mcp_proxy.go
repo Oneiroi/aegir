@@ -10,6 +10,7 @@ import (
 
 	"github.com/aegishjalmur/aegir/internal/logging"
 	"github.com/aegishjalmur/aegir/internal/sanitizer"
+	"github.com/aegishjalmur/aegir/internal/session"
 	"github.com/aegishjalmur/aegir/internal/upstream"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -21,6 +22,7 @@ type MCPProxy struct {
 	sanitizer         *sanitizer.Manager
 	complianceManager *sanitizer.ComplianceManager
 	upstreamManager   *upstream.Manager
+	sessionAnalyzer   *session.ConversationalThreatAnalyzer
 	upgrader          websocket.Upgrader
 }
 
@@ -46,12 +48,13 @@ type MCPError struct {
 }
 
 // NewMCPProxy creates a new MCP proxy instance
-func NewMCPProxy(logger *logging.Logger, sanitizerMgr *sanitizer.Manager, complianceMgr *sanitizer.ComplianceManager, upstreamMgr *upstream.Manager) *MCPProxy {
+func NewMCPProxy(logger *logging.Logger, sanitizerMgr *sanitizer.Manager, complianceMgr *sanitizer.ComplianceManager, upstreamMgr *upstream.Manager, sessionAnalyzer *session.ConversationalThreatAnalyzer) *MCPProxy {
 	return &MCPProxy{
 		logger:            logger,
 		sanitizer:         sanitizerMgr,
 		complianceManager: complianceMgr,
 		upstreamManager:   upstreamMgr,
+		sessionAnalyzer:   sessionAnalyzer,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				// In production, implement proper origin checking
@@ -79,6 +82,36 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 
 	// Log the incoming request
 	p.logMCPRequest(c, &req)
+
+	// Session analysis (if enabled) - BEFORE sanitization
+	if p.sessionAnalyzer != nil {
+		sessionID := p.getSessionID(c)
+		userID := p.getUserID(c)
+
+		// Serialize params for session analysis
+		paramsJSON, _ := json.Marshal(req.Params)
+		assessment := p.sessionAnalyzer.AnalyzeMessage(sessionID, userID, string(paramsJSON))
+
+		// Block if threat level is critical or high
+		if assessment.ConversationRisk == "critical" || assessment.ConversationRisk == "high" {
+			p.logger.Warn("MCP request blocked by session analyzer",
+				"session_id", sessionID,
+				"user_id", userID,
+				"threat_score", assessment.CurrentThreatScore,
+				"risk_level", assessment.ConversationRisk,
+				"patterns", assessment.AttackPatterns)
+
+			c.JSON(http.StatusForbidden, MCPResponse{
+				Error: &MCPError{
+					Code:    -32000,
+					Message: "Request blocked by threat detection",
+					Data:    fmt.Sprintf("Risk level: %s", assessment.ConversationRisk),
+				},
+				ID: req.ID,
+			})
+			return
+		}
+	}
 
 	// Serialize params for content inspection
 	paramsJSON, err := json.Marshal(req.Params)
@@ -1163,4 +1196,17 @@ func (p *MCPProxy) getUserID(c *gin.Context) string {
 		}
 	}
 	return "anonymous"
+}
+
+// getSessionID extracts or generates a session ID from context
+func (p *MCPProxy) getSessionID(c *gin.Context) string {
+	if sessionID, exists := c.Get("session_id"); exists {
+		if sid, ok := sessionID.(string); ok && sid != "" {
+			return sid
+		}
+	}
+	// Generate a session ID from user ID and client IP if not found
+	userID := p.getUserID(c)
+	clientIP := c.ClientIP()
+	return fmt.Sprintf("%s_%s", userID, clientIP)
 }
