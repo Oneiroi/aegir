@@ -52,14 +52,13 @@ func TestTransportModeSelection(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Build the binary for testing
 			cmd := exec.Command("go", "build", "-o", "test-aegir", ".")
-			cmd.Dir = "../../"
 			if err := cmd.Run(); err != nil {
 				t.Fatalf("Failed to build test binary: %v", err)
 			}
-			defer os.Remove("../../test-aegir")
+			defer os.Remove("./test-aegir")
 
 			// Prepare command with transport flag
-			args := []string{"../../test-aegir", "-transport", tt.transport}
+			args := []string{"./test-aegir", "-transport", tt.transport}
 
 			// For STDIO mode, provide input to prevent hanging
 			var stdin *bytes.Buffer
@@ -183,18 +182,17 @@ func TestEnvironmentVariableHandling(t *testing.T) {
 
 			// Build and run the binary with a quick exit
 			cmd := exec.Command("go", "build", "-o", "test-aegir-env", ".")
-			cmd.Dir = "../../"
 			if err := cmd.Run(); err != nil {
 				t.Fatalf("Failed to build test binary: %v", err)
 			}
-			defer os.Remove("../../test-aegir-env")
+			defer os.Remove("./test-aegir-env")
 
 			// Create context with very short timeout since we just want to test startup
 			ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 			defer cancel()
 
 			// Run with STDIO mode and immediate input to cause quick exit
-			testCmd := exec.CommandContext(ctx, "../../test-aegir-env", "-transport", "stdio")
+			testCmd := exec.CommandContext(ctx, "./test-aegir-env", "-transport", "stdio")
 			testCmd.Stdin = strings.NewReader("")  // Empty input causes EOF and exit
 
 			var stderr bytes.Buffer
@@ -252,17 +250,16 @@ func TestTLSConfigurationCreation(t *testing.T) {
 func TestGracefulShutdown(t *testing.T) {
 	// Build the binary
 	cmd := exec.Command("go", "build", "-o", "test-aegir-shutdown", ".")
-	cmd.Dir = "../../"
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Failed to build test binary: %v", err)
 	}
-	defer os.Remove("../../test-aegir-shutdown")
+	defer os.Remove("./test-aegir-shutdown")
 
 	// Start the server in HTTP mode
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	testCmd := exec.CommandContext(ctx, "../../test-aegir-shutdown", "-transport", "http")
+	testCmd := exec.CommandContext(ctx, "./test-aegir-shutdown", "-transport", "http")
 
 	var stderr bytes.Buffer
 	testCmd.Stderr = &stderr

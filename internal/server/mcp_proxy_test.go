@@ -557,6 +557,88 @@ func TestTransportEndpointsCoexistence(t *testing.T) {
 	}
 }
 
+// TestTwoTierThreatResponseRealHTTP sends real HTTP requests through the proxy
+// to verify the exact response format and headers — the T05 manual verification.
+func TestTwoTierThreatResponseRealHTTP(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	criticalMock := newMockAnalyzer("critical", 0.85, "prompt_injection")
+	highMock := newMockAnalyzer("high", 0.72)
+
+	makeRouter := func(mock *MockSessionAnalyzer) *gin.Engine {
+		r := gin.New()
+		logger := testLogger()
+		sanitizerMgr := sanitizer.New(config.Security{}, logger)
+		complianceMgr := sanitizer.NewComplianceManager(config.Compliance{}, logger)
+		upstreamMgr := upstream.NewManager(&config.Upstream{}, logger)
+		proxy := NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, mock)
+		r.POST("/mcp", proxy.HandleMCPRequest)
+		return r
+	}
+
+	t.Run("Real HTTP: Critical request returns 403 with error body", func(t *testing.T) {
+		ts := httptest.NewServer(makeRouter(criticalMock))
+		defer ts.Close()
+
+		body, _ := json.Marshal(MCPRequest{
+			Method: "tools/call",
+			Params: map[string]interface{}{"name": "test"},
+			ID:     "real-1",
+		})
+		resp, err := http.Post(ts.URL+"/mcp", "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("HTTP request failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("Expected 403, got %d", resp.StatusCode)
+		}
+
+		var result MCPResponse
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			t.Fatalf("Failed to decode response: %v", err)
+		}
+		if result.Error == nil || result.Error.Code != -32000 {
+			t.Errorf("Expected MCP error -32000, got: %+v", result.Error)
+		}
+		if result.ID != "real-1" {
+			t.Errorf("Expected ID 'real-1', got %v", result.ID)
+		}
+		t.Logf("Critical HTTP test: status=%d body=%+v", resp.StatusCode, result)
+	})
+
+	t.Run("Real HTTP: High-risk request sets X-Aegir-Risk header", func(t *testing.T) {
+		ts := httptest.NewServer(makeRouter(highMock))
+		defer ts.Close()
+
+		body, _ := json.Marshal(MCPRequest{
+			Method: "tools/call",
+			Params: map[string]interface{}{"name": "test"},
+			ID:     "real-2",
+		})
+		resp, err := http.Post(ts.URL+"/mcp", "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("HTTP request failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusForbidden {
+			t.Errorf("High risk must not return 403 (got %d)", resp.StatusCode)
+		}
+		riskHeader := resp.Header.Get("X-Aegir-Risk")
+		if riskHeader != "high" {
+			t.Errorf("Expected X-Aegir-Risk: high, got %q", riskHeader)
+		}
+		scoreHeader := resp.Header.Get("X-Aegir-Threat-Score")
+		if scoreHeader != "0.72" {
+			t.Errorf("Expected X-Aegir-Threat-Score: 0.72, got %q", scoreHeader)
+		}
+		t.Logf("High-risk HTTP test: status=%d X-Aegir-Risk=%s X-Aegir-Threat-Score=%s",
+			resp.StatusCode, riskHeader, scoreHeader)
+	})
+}
+
 // Benchmark test for transport performance comparison
 func BenchmarkTransportPerformance(b *testing.B) {
 	gin.SetMode(gin.TestMode)

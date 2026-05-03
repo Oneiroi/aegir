@@ -17,45 +17,45 @@ import (
 )
 
 type MockSessionAnalyzer struct {
-	assessments map[string]*session.ThreatAssessment
+	assessment *session.ThreatAssessment
 }
 
 func NewMockSessionAnalyzer() *MockSessionAnalyzer {
-	return &MockSessionAnalyzer{assessments: make(map[string]*session.ThreatAssessment)}
+	return &MockSessionAnalyzer{}
 }
 
 func (m *MockSessionAnalyzer) AnalyzeMessage(sessionID, userID string, content string) *session.ThreatAssessment {
-	key := sessionID + userID
-	if assessment, exists := m.assessments[key]; exists {
-		return assessment
+	if m.assessment != nil {
+		return m.assessment
 	}
-	switch sessionID {
-	case "critical-session":
-		return &session.ThreatAssessment{ConversationRisk: "critical", CurrentThreatScore: 0.85, AttackPatterns: []string{"prompt_injection", "data_exfiltration"}}
-	case "high-session":
-		return &session.ThreatAssessment{ConversationRisk: "high", CurrentThreatScore: 0.72, AttackPatterns: []string{"content_injection"}}
-	case "low-session":
-		return &session.ThreatAssessment{ConversationRisk: "low", CurrentThreatScore: 0.35, AttackPatterns: nil}
-	default:
-		return &session.ThreatAssessment{ConversationRisk: "low", CurrentThreatScore: 0.25, AttackPatterns: nil}
-	}
+	return &session.ThreatAssessment{ConversationRisk: "low", CurrentThreatScore: 0.25}
+}
+
+func testLogger() *logging.Logger {
+	l, _ := logging.New(config.Logging{
+		Level:           "info",
+		Format:          "json",
+		HMACKey:         "test-hmac-key-32-characters-long",
+		IntegrityChecks: true,
+	})
+	return l
 }
 
 func setupMCPProxyWithSessionAnalyzer(sessionRisk string) *MCPProxy {
-	logger, _ := logging.New(config.Logging{})
+	logger := testLogger()
 	sanitizerMgr := sanitizer.New(config.Security{}, logger)
 	complianceMgr := sanitizer.NewComplianceManager(config.Compliance{}, logger)
-	upstreamMgr := upstream.NewManager(nil, logger)
+	upstreamMgr := upstream.NewManager(&config.Upstream{}, logger)
 
 	sessionAnalyzer := NewMockSessionAnalyzer()
 	if sessionRisk != "" {
 		switch sessionRisk {
 		case "critical":
-			sessionAnalyzer.assessments["test"] = &session.ThreatAssessment{ConversationRisk: "critical", CurrentThreatScore: 0.85}
+			sessionAnalyzer.assessment = &session.ThreatAssessment{ConversationRisk: "critical", CurrentThreatScore: 0.85}
 		case "high":
-			sessionAnalyzer.assessments["test"] = &session.ThreatAssessment{ConversationRisk: "high", CurrentThreatScore: 0.72}
+			sessionAnalyzer.assessment = &session.ThreatAssessment{ConversationRisk: "high", CurrentThreatScore: 0.72}
 		case "low":
-			sessionAnalyzer.assessments["test"] = &session.ThreatAssessment{ConversationRisk: "low", CurrentThreatScore: 0.35}
+			sessionAnalyzer.assessment = &session.ThreatAssessment{ConversationRisk: "low", CurrentThreatScore: 0.35}
 		}
 	}
 
@@ -108,17 +108,18 @@ func TestTwoTierThreatResponse(t *testing.T) {
 		c.Request.Header.Set("Content-Type", "application/json")
 
 		proxy.HandleMCPRequest(c)
-		if w.Code != http.StatusOK {
-			t.Errorf("Expected status code %d, got %d", http.StatusOK, w.Code)
+		// High risk requests are forwarded (not blocked), so must not be 403.
+		// With no upstream configured, the response may be 502; what matters is the risk headers.
+		if w.Code == http.StatusForbidden {
+			t.Errorf("High risk request must not be blocked with 403 (got 403)")
 		}
-
 		if w.Header().Get("X-Aegir-Risk") != "high" {
 			t.Errorf("Expected X-Aegir-Risk header to be 'high', got: %s", w.Header().Get("X-Aegir-Risk"))
 		}
 		if w.Header().Get("X-Aegir-Threat-Score") != "0.72" {
 			t.Errorf("Expected X-Aegir-Threat-Score header to be '0.72', got: %s", w.Header().Get("X-Aegir-Threat-Score"))
 		}
-		t.Logf("High risk test passed - Status: %d, Headers present", w.Code)
+		t.Logf("High risk test passed - Status: %d, X-Aegir-Risk: %s", w.Code, w.Header().Get("X-Aegir-Risk"))
 	})
 
 	t.Run("Low Risk - Normal Processing", func(t *testing.T) {
@@ -136,26 +137,35 @@ func TestTwoTierThreatResponse(t *testing.T) {
 	})
 }
 
+func newMockAnalyzer(risk string, score float64, patterns ...string) *MockSessionAnalyzer {
+	m := NewMockSessionAnalyzer()
+	m.assessment = &session.ThreatAssessment{ConversationRisk: risk, CurrentThreatScore: score, AttackPatterns: patterns}
+	return m
+}
+
+func newMockProxy(mock *MockSessionAnalyzer) *MCPProxy {
+	logger := testLogger()
+	sanitizerMgr := sanitizer.New(config.Security{}, logger)
+	complianceMgr := sanitizer.NewComplianceManager(config.Compliance{}, logger)
+	upstreamMgr := upstream.NewManager(&config.Upstream{}, logger)
+	return NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, mock)
+}
+
+func makeTestContext(method string, body []byte) (*httptest.ResponseRecorder, *gin.Context) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/mcp-proxy", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	return w, c
+}
+
 func TestTwoTierThreatResponseBoundaryCases(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	t.Run("Boundary: Score exactly 0.8 (Critical)", func(t *testing.T) {
-		mockAnalyzer := &MockSessionAnalyzer{}
-		mockAnalyzer.assessments["boundary"] = &session.ThreatAssessment{ConversationRisk: "critical", CurrentThreatScore: 0.8}
-		logger, _ := logging.New(config.Logging{})
-		sanitizerMgr := sanitizer.New(config.Security{}, logger)
-		complianceMgr := sanitizer.NewComplianceManager(config.Compliance{}, logger)
-		upstreamMgr := upstream.NewManager(nil, logger)
-
-		proxy := NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, mockAnalyzer)
-		mcpRequest := MCPRequest{Method: "tools/call", ID: 4}
-		mcpRequestJSON, _ := json.Marshal(mcpRequest)
-
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("POST", "/mcp-proxy", bytes.NewReader(mcpRequestJSON))
-		c.Request.Header.Set("Content-Type", "application/json")
-
+		proxy := newMockProxy(newMockAnalyzer("critical", 0.8))
+		body, _ := json.Marshal(MCPRequest{Method: "tools/call", ID: 4})
+		w, c := makeTestContext("POST", body)
 		proxy.HandleMCPRequest(c)
 		if w.Code != http.StatusForbidden {
 			t.Errorf("Expected status code %d (critical threshold), got %d", http.StatusForbidden, w.Code)
@@ -164,51 +174,31 @@ func TestTwoTierThreatResponseBoundaryCases(t *testing.T) {
 	})
 
 	t.Run("Boundary: Score 0.79 (High)", func(t *testing.T) {
-		mockAnalyzer := &MockSessionAnalyzer{}
-		mockAnalyzer.assessments["boundary"] = &session.ThreatAssessment{ConversationRisk: "high", CurrentThreatScore: 0.79}
-		logger, _ := logging.New(config.Logging{})
-		sanitizerMgr := sanitizer.New(config.Security{}, logger)
-		complianceMgr := sanitizer.NewComplianceManager(config.Compliance{}, logger)
-		upstreamMgr := upstream.NewManager(nil, logger)
-
-		proxy := NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, mockAnalyzer)
-		mcpRequest := MCPRequest{Method: "tools/call", ID: 5}
-		mcpRequestJSON, _ := json.Marshal(mcpRequest)
-
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("POST", "/mcp-proxy", bytes.NewReader(mcpRequestJSON))
-		c.Request.Header.Set("Content-Type", "application/json")
-
+		proxy := newMockProxy(newMockAnalyzer("high", 0.79))
+		body, _ := json.Marshal(MCPRequest{Method: "tools/call", ID: 5})
+		w, c := makeTestContext("POST", body)
 		proxy.HandleMCPRequest(c)
-		if w.Code != http.StatusOK {
-			t.Errorf("Expected status code %d (high threshold), got %d", http.StatusOK, w.Code)
+		if w.Code == http.StatusForbidden {
+			t.Errorf("Score 0.79 should be forwarded (high), not blocked with 403")
 		}
-		t.Logf("Boundary test (0.79 exactly) passed - High threshold enforced")
+		if w.Header().Get("X-Aegir-Risk") != "high" {
+			t.Errorf("Expected X-Aegir-Risk: high, got %q", w.Header().Get("X-Aegir-Risk"))
+		}
+		t.Logf("Boundary test (0.79 exactly) passed - High threshold enforced, X-Aegir-Risk: %s", w.Header().Get("X-Aegir-Risk"))
 	})
 
 	t.Run("Boundary: Score 0.6 (High)", func(t *testing.T) {
-		mockAnalyzer := &MockSessionAnalyzer{}
-		mockAnalyzer.assessments["boundary"] = &session.ThreatAssessment{ConversationRisk: "high", CurrentThreatScore: 0.6}
-		logger, _ := logging.New(config.Logging{})
-		sanitizerMgr := sanitizer.New(config.Security{}, logger)
-		complianceMgr := sanitizer.NewComplianceManager(config.Compliance{}, logger)
-		upstreamMgr := upstream.NewManager(nil, logger)
-
-		proxy := NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, mockAnalyzer)
-		mcpRequest := MCPRequest{Method: "tools/call", ID: 6}
-		mcpRequestJSON, _ := json.Marshal(mcpRequest)
-
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("POST", "/mcp-proxy", bytes.NewReader(mcpRequestJSON))
-		c.Request.Header.Set("Content-Type", "application/json")
-
+		proxy := newMockProxy(newMockAnalyzer("high", 0.6))
+		body, _ := json.Marshal(MCPRequest{Method: "tools/call", ID: 6})
+		w, c := makeTestContext("POST", body)
 		proxy.HandleMCPRequest(c)
-		if w.Code != http.StatusOK {
-			t.Errorf("Expected status code %d (minimum high), got %d", http.StatusOK, w.Code)
+		if w.Code == http.StatusForbidden {
+			t.Errorf("Score 0.6 should be forwarded (minimum high), not blocked with 403")
 		}
-		t.Logf("Boundary test (0.6 minimum high) passed")
+		if w.Header().Get("X-Aegir-Risk") != "high" {
+			t.Errorf("Expected X-Aegir-Risk: high, got %q", w.Header().Get("X-Aegir-Risk"))
+		}
+		t.Logf("Boundary test (0.6 minimum high) passed, X-Aegir-Risk: %s", w.Header().Get("X-Aegir-Risk"))
 	})
 }
 
@@ -216,22 +206,9 @@ func TestTwoTierThreatResponseWithMockAnalyzer(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	t.Run("Mock Analyzer - Critical Path", func(t *testing.T) {
-		mockAnalyzer := NewMockSessionAnalyzer()
-		mockAnalyzer.assessments["critical-test"] = &session.ThreatAssessment{ConversationRisk: "critical", CurrentThreatScore: 0.85, AttackPatterns: []string{"prompt_injection"}}
-		logger, _ := logging.New(config.Logging{})
-		sanitizerMgr := sanitizer.New(config.Security{}, logger)
-		complianceMgr := sanitizer.NewComplianceManager(config.Compliance{}, logger)
-		upstreamMgr := upstream.NewManager(nil, logger)
-
-		proxy := NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, mockAnalyzer)
-		mcpRequest := MCPRequest{Method: "tools/call", ID: 7}
-		mcpRequestJSON, _ := json.Marshal(mcpRequest)
-
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("POST", "/mcp-proxy", bytes.NewReader(mcpRequestJSON))
-		c.Request.Header.Set("Content-Type", "application/json")
-
+		proxy := newMockProxy(newMockAnalyzer("critical", 0.85, "prompt_injection"))
+		body, _ := json.Marshal(MCPRequest{Method: "tools/call", ID: 7})
+		w, c := makeTestContext("POST", body)
 		proxy.HandleMCPRequest(c)
 		if w.Code != http.StatusForbidden {
 			t.Errorf("Expected status code %d, got %d", http.StatusForbidden, w.Code)
@@ -240,27 +217,17 @@ func TestTwoTierThreatResponseWithMockAnalyzer(t *testing.T) {
 	})
 
 	t.Run("Mock Analyzer - High Path", func(t *testing.T) {
-		mockAnalyzer := NewMockSessionAnalyzer()
-		mockAnalyzer.assessments["high-test"] = &session.ThreatAssessment{ConversationRisk: "high", CurrentThreatScore: 0.72, AttackPatterns: []string{"content_injection"}}
-		logger, _ := logging.New(config.Logging{})
-		sanitizerMgr := sanitizer.New(config.Security{}, logger)
-		complianceMgr := sanitizer.NewComplianceManager(config.Compliance{}, logger)
-		upstreamMgr := upstream.NewManager(nil, logger)
-
-		proxy := NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, mockAnalyzer)
-		mcpRequest := MCPRequest{Method: "tools/call", ID: 8}
-		mcpRequestJSON, _ := json.Marshal(mcpRequest)
-
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("POST", "/mcp-proxy", bytes.NewReader(mcpRequestJSON))
-		c.Request.Header.Set("Content-Type", "application/json")
-
+		proxy := newMockProxy(newMockAnalyzer("high", 0.72, "content_injection"))
+		body, _ := json.Marshal(MCPRequest{Method: "tools/call", ID: 8})
+		w, c := makeTestContext("POST", body)
 		proxy.HandleMCPRequest(c)
-		if w.Code != http.StatusOK {
-			t.Errorf("Expected status code %d, got %d", http.StatusOK, w.Code)
+		if w.Code == http.StatusForbidden {
+			t.Errorf("High risk must not be blocked with 403, got %d", w.Code)
 		}
-		t.Logf("Mock analyzer high path test passed")
+		if w.Header().Get("X-Aegir-Risk") != "high" {
+			t.Errorf("Expected X-Aegir-Risk: high, got %q", w.Header().Get("X-Aegir-Risk"))
+		}
+		t.Logf("Mock analyzer high path test passed, X-Aegir-Risk: %s", w.Header().Get("X-Aegir-Risk"))
 	})
 }
 
@@ -268,45 +235,25 @@ func TestTwoTierThreatResponseLogging(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	t.Run("Critical Risk Logging Verification", func(t *testing.T) {
-		mockAnalyzer := NewMockSessionAnalyzer()
-		mockAnalyzer.assessments["log-test"] = &session.ThreatAssessment{ConversationRisk: "critical", CurrentThreatScore: 0.85}
-		logger, _ := logging.New(config.Logging{})
-		sanitizerMgr := sanitizer.New(config.Security{}, logger)
-		complianceMgr := sanitizer.NewComplianceManager(config.Compliance{}, logger)
-		upstreamMgr := upstream.NewManager(nil, logger)
-
-		proxy := NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, mockAnalyzer)
-		mcpRequest := MCPRequest{Method: "tools/call", ID: 9}
-		mcpRequestJSON, _ := json.Marshal(mcpRequest)
-
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("POST", "/mcp-proxy", bytes.NewReader(mcpRequestJSON))
-		c.Request.Header.Set("Content-Type", "application/json")
-
+		proxy := newMockProxy(newMockAnalyzer("critical", 0.85))
+		body, _ := json.Marshal(MCPRequest{Method: "tools/call", ID: 9})
+		w, c := makeTestContext("POST", body)
 		proxy.HandleMCPRequest(c)
-		t.Logf("Critical risk logging test - Request processed with critical risk")
+		if w.Code != http.StatusForbidden {
+			t.Errorf("Expected 403 for critical risk, got %d", w.Code)
+		}
+		t.Logf("Critical risk logging test - Request blocked with critical risk")
 	})
 
 	t.Run("High Risk Logging Verification", func(t *testing.T) {
-		mockAnalyzer := NewMockSessionAnalyzer()
-		mockAnalyzer.assessments["log-test"] = &session.ThreatAssessment{ConversationRisk: "high", CurrentThreatScore: 0.72}
-		logger, _ := logging.New(config.Logging{})
-		sanitizerMgr := sanitizer.New(config.Security{}, logger)
-		complianceMgr := sanitizer.NewComplianceManager(config.Compliance{}, logger)
-		upstreamMgr := upstream.NewManager(nil, logger)
-
-		proxy := NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, mockAnalyzer)
-		mcpRequest := MCPRequest{Method: "tools/call", ID: 10}
-		mcpRequestJSON, _ := json.Marshal(mcpRequest)
-
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("POST", "/mcp-proxy", bytes.NewReader(mcpRequestJSON))
-		c.Request.Header.Set("Content-Type", "application/json")
-
+		proxy := newMockProxy(newMockAnalyzer("high", 0.72))
+		body, _ := json.Marshal(MCPRequest{Method: "tools/call", ID: 10})
+		w, c := makeTestContext("POST", body)
 		proxy.HandleMCPRequest(c)
-		t.Logf("High risk logging test - Request processed with high risk")
+		if w.Header().Get("X-Aegir-Risk") != "high" {
+			t.Errorf("Expected X-Aegir-Risk: high header, got: %q", w.Header().Get("X-Aegir-Risk"))
+		}
+		t.Logf("High risk logging test - Request forwarded with risk header")
 	})
 }
 
@@ -314,40 +261,22 @@ func TestTwoTierThreatResponseEdgeCases(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	t.Run("Empty Session Analyzer - Should Process Normally", func(t *testing.T) {
-		logger, _ := logging.New(config.Logging{})
+		logger := testLogger()
 		sanitizerMgr := sanitizer.New(config.Security{}, logger)
 		complianceMgr := sanitizer.NewComplianceManager(config.Compliance{}, logger)
-		upstreamMgr := upstream.NewManager(nil, logger)
+		upstreamMgr := upstream.NewManager(&config.Upstream{}, logger)
 
 		proxy := NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, nil)
-		mcpRequest := MCPRequest{Method: "tools/call", ID: 11}
-		mcpRequestJSON, _ := json.Marshal(mcpRequest)
-
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("POST", "/mcp-proxy", bytes.NewReader(mcpRequestJSON))
-		c.Request.Header.Set("Content-Type", "application/json")
-
+		body, _ := json.Marshal(MCPRequest{Method: "tools/call", ID: 11})
+		_, c := makeTestContext("POST", body)
 		proxy.HandleMCPRequest(c)
 		t.Logf("Empty session analyzer test - Request processed normally without analyzer")
 	})
 
 	t.Run("Malformed JSON Input", func(t *testing.T) {
-		logger, _ := logging.New(config.Logging{})
-		sanitizerMgr := sanitizer.New(config.Security{}, logger)
-		complianceMgr := sanitizer.NewComplianceManager(config.Compliance{}, logger)
-		upstreamMgr := upstream.NewManager(nil, logger)
-
-		mockAnalyzer := NewMockSessionAnalyzer()
-		mockAnalyzer.assessments["test"] = &session.ThreatAssessment{ConversationRisk: "low", CurrentThreatScore: 0.35}
-		proxy := NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, mockAnalyzer)
+		proxy := newMockProxy(newMockAnalyzer("low", 0.35))
 		malformedJSON := []byte(`{"method": "tools/call", "invalid json}`)
-
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("POST", "/mcp-proxy", bytes.NewReader(malformedJSON))
-		c.Request.Header.Set("Content-Type", "application/json")
-
+		w, c := makeTestContext("POST", malformedJSON)
 		proxy.HandleMCPRequest(c)
 		if w.Code != http.StatusBadRequest {
 			t.Errorf("Expected status code %d for malformed JSON, got %d", http.StatusBadRequest, w.Code)
@@ -356,38 +285,19 @@ func TestTwoTierThreatResponseEdgeCases(t *testing.T) {
 	})
 
 	t.Run("Missing Required Fields", func(t *testing.T) {
-		logger, _ := logging.New(config.Logging{})
-		sanitizerMgr := sanitizer.New(config.Security{}, logger)
-		complianceMgr := sanitizer.NewComplianceManager(config.Compliance{}, logger)
-		upstreamMgr := upstream.NewManager(nil, logger)
-
-		mockAnalyzer := NewMockSessionAnalyzer()
-		mockAnalyzer.assessments["test"] = &session.ThreatAssessment{ConversationRisk: "low", CurrentThreatScore: 0.35}
-		proxy := NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, mockAnalyzer)
-		mcpRequest := MCPRequest{Method: "tools/call", ID: 12}
-		mcpRequestJSON, _ := json.Marshal(mcpRequest)
-
-		w := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("POST", "/mcp-proxy", bytes.NewReader(mcpRequestJSON))
-		c.Request.Header.Set("Content-Type", "application/json")
-
+		proxy := newMockProxy(newMockAnalyzer("low", 0.35))
+		body, _ := json.Marshal(MCPRequest{Method: "tools/call", ID: 12})
+		w, c := makeTestContext("POST", body)
 		proxy.HandleMCPRequest(c)
-		t.Logf("Missing required fields test - Request processed with default behavior")
+		t.Logf("Missing required fields test - Response status: %d", w.Code)
 	})
 }
 
 func BenchmarkTwoTierThreatResponse(b *testing.B) {
 	gin.SetMode(gin.TestMode)
 
-	logger, _ := logging.New(config.Logging{})
-	sanitizerMgr := sanitizer.New(config.Security{}, logger)
-	complianceMgr := sanitizer.NewComplianceManager(config.Compliance{}, logger)
-	upstreamMgr := upstream.NewManager(nil, logger)
-
-	mockAnalyzer := NewMockSessionAnalyzer()
-	mockAnalyzer.assessments["benchmark"] = &session.ThreatAssessment{ConversationRisk: "high", CurrentThreatScore: 0.72}
-	proxy := NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, mockAnalyzer)
+	mockAnalyzer := newMockAnalyzer("high", 0.72)
+	proxy := newMockProxy(mockAnalyzer)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

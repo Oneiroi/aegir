@@ -22,7 +22,7 @@ type MCPProxy struct {
 	sanitizer         *sanitizer.Manager
 	complianceManager *sanitizer.ComplianceManager
 	upstreamManager   *upstream.Manager
-	sessionAnalyzer   *session.ConversationalThreatAnalyzer
+	sessionAnalyzer   session.ThreatAnalyzer
 	upgrader          websocket.Upgrader
 }
 
@@ -48,7 +48,7 @@ type MCPError struct {
 }
 
 // NewMCPProxy creates a new MCP proxy instance
-func NewMCPProxy(logger *logging.Logger, sanitizerMgr *sanitizer.Manager, complianceMgr *sanitizer.ComplianceManager, upstreamMgr *upstream.Manager, sessionAnalyzer *session.ConversationalThreatAnalyzer) *MCPProxy {
+func NewMCPProxy(logger *logging.Logger, sanitizerMgr *sanitizer.Manager, complianceMgr *sanitizer.ComplianceManager, upstreamMgr *upstream.Manager, sessionAnalyzer session.ThreatAnalyzer) *MCPProxy {
 	return &MCPProxy{
 		logger:            logger,
 		sanitizer:         sanitizerMgr,

@@ -77,6 +77,11 @@ type ThreatAssessment struct {
 	Indicators         map[string]int    `json:"indicators"`
 }
 
+// ThreatAnalyzer is the interface for session-level threat analysis.
+type ThreatAnalyzer interface {
+	AnalyzeMessage(sessionID, userID, content string) *ThreatAssessment
+}
+
 // NewConversationalThreatAnalyzer creates a new analyzer
 func NewConversationalThreatAnalyzer(config AnalyzerConfig, logger *logging.Logger) *ConversationalThreatAnalyzer {
 	analyzer := &ConversationalThreatAnalyzer{
