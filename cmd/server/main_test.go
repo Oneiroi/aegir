@@ -26,19 +26,19 @@ func TestTransportModeSelection(t *testing.T) {
 			name:           "HTTP mode",
 			transport:      "http",
 			expectError:    false,
-			expectedOutput: "Starting Aegir server in http mode",
+			expectedOutput: "Starting MCP Firewall server in http mode",
 		},
 		{
 			name:           "SSE mode",
 			transport:      "sse",
 			expectError:    false,
-			expectedOutput: "Starting Aegir server in sse mode",
+			expectedOutput: "Starting MCP Firewall server in sse mode",
 		},
 		{
 			name:           "STDIO mode",
 			transport:      "stdio",
 			expectError:    false,
-			expectedOutput: "Starting Aegir in STDIO mode",
+			expectedOutput: "Starting MCP Firewall in STDIO mode",
 		},
 		{
 			name:          "Invalid mode",
@@ -63,7 +63,7 @@ func TestTransportModeSelection(t *testing.T) {
 			// For STDIO mode, provide input to prevent hanging
 			var stdin *bytes.Buffer
 			if tt.transport == "stdio" {
-				stdin = bytes.NewBufferString(`{"method":"initialize","params":{"protocolVersion":"2024-11-05"},"id":"1"}`)
+				stdin = bytes.NewBufferString(`{"method":"initialize","params":{"protocolVersion":"2025-06-18"},"id":"1"}`)
 			}
 
 			// Create context with timeout to prevent hanging
@@ -98,7 +98,7 @@ func TestTransportModeSelection(t *testing.T) {
 				// For STDIO mode, also check stdout for the response
 				if tt.transport == "stdio" {
 					stdoutStr := stdout.String()
-					if !strings.Contains(stdoutStr, `"protocolVersion":"2024-11-05"`) {
+					if !strings.Contains(stdoutStr, `"protocolVersion":"2025-06-18"`) {
 						t.Errorf("Expected MCP response in stdout, got: %s", stdoutStr)
 					}
 				}
@@ -282,7 +282,7 @@ func TestGracefulShutdown(t *testing.T) {
 
 	// Check stderr for shutdown messages
 	stderrStr := stderr.String()
-	if !strings.Contains(stderrStr, "Starting Aegir server in http mode") {
+	if !strings.Contains(stderrStr, "Starting MCP Firewall server in http mode") {
 		t.Error("Expected startup message not found")
 	}
 
