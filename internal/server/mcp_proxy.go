@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/aegishjalmur/aegir/internal/logging"
@@ -434,17 +435,33 @@ func (p *MCPProxy) handleResourcesList(ctx context.Context, req *MCPRequest) *MC
 	}
 
 	// Handle pagination
-	var nextCursor *string
+	offset := 0
 	paramsMap, ok := req.Params.(map[string]interface{})
 	if ok {
 		if cursor, exists := paramsMap["cursor"]; exists && cursor != nil {
-			// In a real implementation, handle pagination here
-			// For now, no additional pages
+			if cursorStr, ok := cursor.(string); ok && cursorStr != "" {
+				if n, err := strconv.Atoi(cursorStr); err == nil && n >= 0 {
+					offset = n
+				}
+			}
 		}
+	}
+	end := offset + 50
+	if offset > len(resources) {
+		offset = len(resources)
+	}
+	if end > len(resources) {
+		end = len(resources)
+	}
+
+	var nextCursor *string
+	if end < len(resources) {
+		s := strconv.Itoa(end)
+		nextCursor = &s
 	}
 
 	result := map[string]interface{}{
-		"resources": resources,
+		"resources": resources[offset:end],
 	}
 
 	if nextCursor != nil {
@@ -494,20 +511,62 @@ func (p *MCPProxy) handleResourcesRead(ctx context.Context, req *MCPRequest) *MC
 		}
 	}
 
-	// For demo purposes, return a placeholder response
-	result := map[string]interface{}{
-		"contents": []map[string]interface{}{
-			{
-				"uri":      uri,
-				"mimeType": "text/plain",
-				"text":     "Resource content filtered by MCP Firewall",
+	// Serve security:// URIs from internal firewall components; all other URIs require upstream
+	parsedURI, _ := url.Parse(uri)
+	if parsedURI.Scheme == "security" {
+		var content map[string]interface{}
+		switch uri {
+		case "security://scan/content":
+			content = map[string]interface{}{
+				"type":        "scanner",
+				"description": "MCP Firewall content security scanner",
+				"capabilities": []string{
+					"command_injection", "prompt_injection", "xss",
+					"sql_injection", "secrets", "pii", "phi", "pci",
+					"homoglyphs", "unicode_attacks",
+				},
+				"sanitizer_active":  p.sanitizer != nil,
+				"compliance_active": p.complianceManager != nil,
+				"status":            "active",
+			}
+		case "security://policy/status":
+			content = map[string]interface{}{
+				"type":             "policy",
+				"sanitizer":        p.sanitizer != nil,
+				"compliance":       p.complianceManager != nil,
+				"session_analysis": p.sessionAnalyzer != nil,
+				"upstream":         p.upstreamManager != nil,
+				"status":           "active",
+			}
+		default:
+			content = map[string]interface{}{
+				"type":   "security",
+				"uri":    uri,
+				"status": "active",
+			}
+		}
+		contentBytes, _ := json.Marshal(content)
+		return &MCPResponse{
+			Result: map[string]interface{}{
+				"contents": []map[string]interface{}{
+					{
+						"uri":      uri,
+						"mimeType": "application/json",
+						"text":     string(contentBytes),
+					},
+				},
 			},
-		},
+			ID: req.ID,
+		}
 	}
 
 	return &MCPResponse{
-		Result: result,
-		ID:     req.ID,
+		Error: &MCPError{
+			Code:    -32000,
+			Message: "upstream unavailable",
+			Data:    "resource cannot be fetched without an upstream connection",
+		},
+		ID: req.ID,
 	}
 }
 
@@ -586,16 +645,33 @@ func (p *MCPProxy) handleToolsList(ctx context.Context, req *MCPRequest) *MCPRes
 	}
 
 	// Handle pagination
-	var nextCursor *string
+	offset := 0
 	paramsMap, ok := req.Params.(map[string]interface{})
 	if ok {
 		if cursor, exists := paramsMap["cursor"]; exists && cursor != nil {
-			// In a real implementation, handle pagination here
+			if cursorStr, ok := cursor.(string); ok && cursorStr != "" {
+				if n, err := strconv.Atoi(cursorStr); err == nil && n >= 0 {
+					offset = n
+				}
+			}
 		}
+	}
+	end := offset + 50
+	if offset > len(tools) {
+		offset = len(tools)
+	}
+	if end > len(tools) {
+		end = len(tools)
+	}
+
+	var nextCursor *string
+	if end < len(tools) {
+		s := strconv.Itoa(end)
+		nextCursor = &s
 	}
 
 	result := map[string]interface{}{
-		"tools": tools,
+		"tools": tools[offset:end],
 	}
 
 	if nextCursor != nil {
@@ -829,16 +905,33 @@ func (p *MCPProxy) handlePromptsList(ctx context.Context, req *MCPRequest) *MCPR
 	}
 
 	// Handle pagination
-	var nextCursor *string
+	offset := 0
 	paramsMap, ok := req.Params.(map[string]interface{})
 	if ok {
 		if cursor, exists := paramsMap["cursor"]; exists && cursor != nil {
-			// In a real implementation, handle pagination here
+			if cursorStr, ok := cursor.(string); ok && cursorStr != "" {
+				if n, err := strconv.Atoi(cursorStr); err == nil && n >= 0 {
+					offset = n
+				}
+			}
 		}
+	}
+	end := offset + 50
+	if offset > len(prompts) {
+		offset = len(prompts)
+	}
+	if end > len(prompts) {
+		end = len(prompts)
+	}
+
+	var nextCursor *string
+	if end < len(prompts) {
+		s := strconv.Itoa(end)
+		nextCursor = &s
 	}
 
 	result := map[string]interface{}{
-		"prompts": prompts,
+		"prompts": prompts[offset:end],
 	}
 
 	if nextCursor != nil {
