@@ -4,8 +4,8 @@ slug: 20260513-203000_aegir-alpha-stabilisation
 project: Aegir
 effort: E3
 effort_source: classifier
-phase: observe
-progress: 0/34
+phase: verify
+progress: 33/34
 mode: interactive
 started: 2026-05-13T20:30:00Z
 updated: 2026-05-13T20:30:00Z
@@ -53,34 +53,34 @@ Commit all in-flight changes, fix the hanging server test, wire the session anal
 - [x] ISC-4: `go test ./internal/server/... -timeout 60s` exits with code 0
 - [x] ISC-5: `TestTransportEndpointsCoexistence` completes in under 5 seconds wall clock
 - [x] ISC-6: `GET /mcp/sse` subtest asserts `Content-Type: text/event-stream` and passes
-- [ ] ISC-7: `go test ./internal/server/... -race -timeout 60s` reports no data races
+- [x] ISC-7: `go test ./internal/server/... -race -timeout 60s` reports no data races
 - [x] ISC-8: All other `internal/server` tests pass (TestMCPProxy*, TestTwoTier*, TestSSE*, TestProxy*)
-- [ ] ISC-9: `go test ./...` exits 0 (all packages green)
+- [ ] ISC-9: `go test ./...` exits 0 (all packages green) — PARTIAL: cmd/server, internal/server, internal/session, internal/anomaly all green; internal/sanitizer has 8 pre-existing failures (LDAP/template/path-traversal/SSRF detection) out of scope for M004; reduced from 10→8 (fixed spacing_variation, memory_manipulation)
 - [x] ISC-10: `HandleWebSocket` calls `p.sessionAnalyzer.AnalyzeMessage` for each inbound client message
 - [x] ISC-11: When session analyzer returns `BlockConversation: true`, WebSocket handler sends a JSON error frame and closes the connection
 - [x] ISC-12: `ConversationalThreatAnalyzer` has a `Stop()` method that signals the cleanup goroutine to exit
 - [x] ISC-13: `NewConversationalThreatAnalyzer` wires the stop channel so `Stop()` terminates `cleanupRoutine`
-- [ ] ISC-14: `TestTransportEndpointsCoexistence` uses `createTestMCPProxy()` whose session analyzer (if any) is stopped after the test
+- [x] ISC-14: `TestTransportEndpointsCoexistence` uses `createTestMCPProxy()` whose session analyzer (if any) is stopped after the test
 - [x] ISC-15: `session_analysis.enabled` default is `true` in config defaults (verified in config.go line 482)
-- [ ] ISC-16: `GET /api/security/sessions` returns session list JSON when analyzer is active
-- [ ] ISC-17: `internal/anomaly` package exists with `detector.go` containing a `Detector` interface
-- [ ] ISC-18: `Detector` interface has method `Score(content string) float64`
-- [ ] ISC-19: `HeuristicDetector` struct implements `Detector`
-- [ ] ISC-20: `HeuristicDetector.Score` returns ≤ 0.2 for a normal English sentence
-- [ ] ISC-21: `HeuristicDetector.Score` returns ≥ 0.7 for a 2000-char random base64 string (entropy anomaly)
-- [ ] ISC-22: `HeuristicDetector.Score` returns ≥ 0.7 for a string with >80% non-ASCII characters
-- [ ] ISC-23: `MCPProxy` has an `anomalyDetector` field of type `anomaly.Detector` (interface, nullable)
-- [ ] ISC-24: `HandleMCPRequest` calls `anomalyDetector.Score` when non-nil and logs the result
-- [ ] ISC-25: Anomaly score field appears in the HMAC-protected log line for the request
-- [ ] ISC-26: `GET /api/security/metrics` response includes an `anomaly_scores` summary field
-- [ ] ISC-27: Unit tests in `internal/anomaly/detector_test.go` pass for benign and anomalous inputs
-- [ ] ISC-28: `anomaly_detection.enabled` config flag exists and defaults to `false` (opt-in)
-- [ ] ISC-29: `make build` completes with exit 0 after all code changes
-- [ ] ISC-30: Dashboard login page renders at `https://localhost:8443/dashboard` (verified via Interceptor)
-- [ ] ISC-31: Login with `admin/admin123` succeeds and redirects to dashboard metrics view
-- [ ] ISC-32: Anti: the SSE test fix does not remove or skip the `Content-Type: text/event-stream` assertion
-- [ ] ISC-33: Anti: `MCPProxy` never panics when `sessionAnalyzer` is nil (nil-guard present and tested)
-- [ ] ISC-34: Anti: `logs/` directory and `certs/key.pem` do not appear in `git ls-files`
+- [x] ISC-16: `GET /api/security/sessions` returns session list JSON when analyzer is active
+- [x] ISC-17: `internal/anomaly` package exists with `detector.go` containing a `Detector` interface
+- [x] ISC-18: `Detector` interface has method `Score(content string) float64`
+- [x] ISC-19: `HeuristicDetector` struct implements `Detector`
+- [x] ISC-20: `HeuristicDetector.Score` returns ≤ 0.2 for a normal English sentence
+- [x] ISC-21: `HeuristicDetector.Score` returns ≥ 0.7 for a 2000-char random base64 string (entropy anomaly)
+- [x] ISC-22: `HeuristicDetector.Score` returns ≥ 0.7 for a string with >80% non-ASCII characters
+- [x] ISC-23: `MCPProxy` has an `anomalyDetector` field of type `anomaly.Detector` (interface, nullable)
+- [x] ISC-24: `HandleMCPRequest` calls `anomalyDetector.Score` when non-nil and logs the result
+- [x] ISC-25: Anomaly score field appears in the HMAC-protected log line for the request
+- [x] ISC-26: `GET /api/security/metrics` response includes an `anomaly_scores` summary field
+- [x] ISC-27: Unit tests in `internal/anomaly/detector_test.go` pass for benign and anomalous inputs
+- [x] ISC-28: `anomaly_detection.enabled` config flag exists and defaults to `false` (opt-in)
+- [x] ISC-29: `make build` completes with exit 0 after all code changes
+- [x] ISC-30: Dashboard login page renders at `https://localhost:8443/dashboard` (verified via Interceptor)
+- [x] ISC-31: Login with `admin/admin123` succeeds and redirects to dashboard metrics view
+- [x] ISC-32: Anti: the SSE test fix does not remove or skip the `Content-Type: text/event-stream` assertion
+- [x] ISC-33: Anti: `MCPProxy` never panics when `sessionAnalyzer` is nil (nil-guard present and tested)
+- [x] ISC-34: Anti: `logs/` directory and `certs/key.pem` do not appear in `git ls-files`
 
 ## Test Strategy
 
