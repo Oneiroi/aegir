@@ -59,7 +59,7 @@ func createTestMCPProxy() *MCPProxy {
 	}
 	sessionAnalyzer := session.NewConversationalThreatAnalyzer(sessionCfg, logger)
 
-	return NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, sessionAnalyzer)
+	return NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, sessionAnalyzer, nil)
 }
 
 func TestMCPInitialize(t *testing.T) {
@@ -540,7 +540,23 @@ func TestTransportEndpointsCoexistence(t *testing.T) {
 			}
 
 			w := httptest.NewRecorder()
-			router.ServeHTTP(w, req)
+
+			// GET /mcp/sse opens a persistent event stream that blocks until the
+			// request context is cancelled. Use a short-lived context so the
+			// handler exits cleanly without hanging the test suite.
+			if endpoint.method == "GET" && strings.Contains(endpoint.path, "sse") {
+				ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+				defer cancel()
+				req = req.WithContext(ctx)
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					router.ServeHTTP(w, req)
+				}()
+				<-done
+			} else {
+				router.ServeHTTP(w, req)
+			}
 
 			// Check that endpoint exists (not 404)
 			if w.Code == 404 {
@@ -571,7 +587,7 @@ func TestTwoTierThreatResponseRealHTTP(t *testing.T) {
 		sanitizerMgr := sanitizer.New(config.Security{}, logger)
 		complianceMgr := sanitizer.NewComplianceManager(config.Compliance{}, logger)
 		upstreamMgr := upstream.NewManager(&config.Upstream{}, logger)
-		proxy := NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, mock)
+		proxy := NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, mock, nil)
 		r.POST("/mcp", proxy.HandleMCPRequest)
 		return r
 	}

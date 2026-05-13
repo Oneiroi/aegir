@@ -47,21 +47,21 @@ Commit all in-flight changes, fix the hanging server test, wire the session anal
 
 ## Criteria
 
-- [ ] ISC-1: `git status` shows zero modified tracked files after the initial commit
-- [ ] ISC-2: `git log --oneline -1` shows a commit authored today with a descriptive message
-- [ ] ISC-3: New untracked design/config files (TODOS.md, bouncer doc, telemetry pkg, logs/) are either committed or listed in .gitignore
-- [ ] ISC-4: `go test ./internal/server/... -timeout 60s` exits with code 0
-- [ ] ISC-5: `TestTransportEndpointsCoexistence` completes in under 5 seconds wall clock
-- [ ] ISC-6: `GET /mcp/sse` subtest asserts `Content-Type: text/event-stream` and passes
+- [x] ISC-1: `git status` shows zero modified tracked files after the initial commit
+- [x] ISC-2: `git log --oneline -1` shows a commit authored today with a descriptive message
+- [x] ISC-3: New untracked design/config files (TODOS.md, bouncer doc, telemetry pkg, logs/) are either committed or listed in .gitignore
+- [x] ISC-4: `go test ./internal/server/... -timeout 60s` exits with code 0
+- [x] ISC-5: `TestTransportEndpointsCoexistence` completes in under 5 seconds wall clock
+- [x] ISC-6: `GET /mcp/sse` subtest asserts `Content-Type: text/event-stream` and passes
 - [ ] ISC-7: `go test ./internal/server/... -race -timeout 60s` reports no data races
-- [ ] ISC-8: All other `internal/server` tests pass (TestMCPProxy*, TestTwoTier*, TestSSE*, TestProxy*)
+- [x] ISC-8: All other `internal/server` tests pass (TestMCPProxy*, TestTwoTier*, TestSSE*, TestProxy*)
 - [ ] ISC-9: `go test ./...` exits 0 (all packages green)
-- [ ] ISC-10: `HandleWebSocket` calls `p.sessionAnalyzer.AnalyzeMessage` for each inbound client message
-- [ ] ISC-11: When session analyzer returns `BlockConversation: true`, WebSocket handler sends a JSON error frame and closes the connection
-- [ ] ISC-12: `ConversationalThreatAnalyzer` has a `Stop()` method that signals the cleanup goroutine to exit
-- [ ] ISC-13: `NewConversationalThreatAnalyzer` wires the stop channel so `Stop()` terminates `cleanupRoutine`
+- [x] ISC-10: `HandleWebSocket` calls `p.sessionAnalyzer.AnalyzeMessage` for each inbound client message
+- [x] ISC-11: When session analyzer returns `BlockConversation: true`, WebSocket handler sends a JSON error frame and closes the connection
+- [x] ISC-12: `ConversationalThreatAnalyzer` has a `Stop()` method that signals the cleanup goroutine to exit
+- [x] ISC-13: `NewConversationalThreatAnalyzer` wires the stop channel so `Stop()` terminates `cleanupRoutine`
 - [ ] ISC-14: `TestTransportEndpointsCoexistence` uses `createTestMCPProxy()` whose session analyzer (if any) is stopped after the test
-- [ ] ISC-15: `session_analysis.enabled` default is `true` in config defaults (verified in config.go line 482)
+- [x] ISC-15: `session_analysis.enabled` default is `true` in config defaults (verified in config.go line 482)
 - [ ] ISC-16: `GET /api/security/sessions` returns session list JSON when analyzer is active
 - [ ] ISC-17: `internal/anomaly` package exists with `detector.go` containing a `Detector` interface
 - [ ] ISC-18: `Detector` interface has method `Score(content string) float64`

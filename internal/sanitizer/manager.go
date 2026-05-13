@@ -365,9 +365,26 @@ func (m *Manager) logSecurityEvent(result *SanitizationResult) {
 	m.logger.LogSecurityEvent(event)
 }
 
+// collapseSpacingVariant collapses letter-spaced obfuscation ("i g n o r e" → "ignore")
+// so that spacing-variation bypass attempts are caught by existing patterns.
+func collapseSpacingVariant(s string) string {
+	words := strings.Fields(s)
+	allSingle := len(words) > 3
+	for _, w := range words {
+		if len([]rune(w)) != 1 {
+			allSingle = false
+			break
+		}
+	}
+	if allSingle {
+		return strings.Join(words, "")
+	}
+	return s
+}
+
 // detectPromptInjection detects various prompt injection attack patterns
 func (m *Manager) detectPromptInjection(result *SanitizationResult) *SanitizationResult {
-	content := result.Sanitized
+	content := collapseSpacingVariant(result.Sanitized)
 
 	// Comprehensive prompt injection patterns
 	patterns := []struct {
@@ -419,7 +436,7 @@ func (m *Manager) detectPromptInjection(result *SanitizationResult) *Sanitizatio
 		},
 		{
 			"memory_manipulation",
-			`(?i)(remember that|keep in mind|don't forget|always remember).*(?:you are|I am|we are|this is)`,
+			`(?i)(remember that|keep in mind|don't forget|always remember).*(?:you are|you can|I am|we are|this is|can do|anything|everything|no limits|no restrictions)`,
 			"UNSAFE_MEMORY_MANIPULATION_REMOVED",
 			"medium",
 			"Attempt to manipulate AI memory or state",

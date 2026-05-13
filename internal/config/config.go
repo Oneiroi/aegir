@@ -98,6 +98,11 @@ type Logging struct {
 	IntegrityChecks bool   `json:"integrity_checks" mapstructure:"integrity_checks"`
 }
 
+// AnomalyDetection configuration for heuristic content anomaly scoring
+type AnomalyDetection struct {
+	Enabled bool `json:"enabled" mapstructure:"enabled"`
+}
+
 // Security configuration
 type Security struct {
 	RateLimit         RateLimit         `json:"rate_limit"         mapstructure:"rate_limit"`
@@ -105,6 +110,7 @@ type Security struct {
 	Encryption        Encryption        `json:"encryption"         mapstructure:"encryption"`
 	SecretDetection   SecretDetection   `json:"secret_detection"   mapstructure:"secret_detection"`
 	CommandInjection  CommandInjection  `json:"command_injection"  mapstructure:"command_injection"`
+	AnomalyDetection  AnomalyDetection  `json:"anomaly_detection"  mapstructure:"anomaly_detection"`
 }
 
 // RateLimit configuration
@@ -489,6 +495,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("session_analysis.emotional_manip_threshold", 0.4)
 
 	// Upstream defaults
+	v.SetDefault("security.anomaly_detection.enabled", false)
+
 	v.SetDefault("upstream.services", []map[string]interface{}{
 		{
 			"name":      "default-mcp-service",

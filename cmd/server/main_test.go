@@ -260,6 +260,7 @@ func TestGracefulShutdown(t *testing.T) {
 	defer cancel()
 
 	testCmd := exec.CommandContext(ctx, "./test-aegir-shutdown", "-transport", "http")
+	testCmd.Env = append(os.Environ(), "MCP_SERVER_TLS_ENABLED=false")
 
 	var stderr bytes.Buffer
 	testCmd.Stderr = &stderr

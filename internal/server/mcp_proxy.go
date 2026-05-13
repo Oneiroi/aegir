@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aegishjalmur/aegir/internal/anomaly"
 	"github.com/aegishjalmur/aegir/internal/dashboard"
 	"github.com/aegishjalmur/aegir/internal/logging"
 	"github.com/aegishjalmur/aegir/internal/sanitizer"
@@ -26,6 +27,7 @@ type MCPProxy struct {
 	complianceManager *sanitizer.ComplianceManager
 	upstreamManager   *upstream.Manager
 	sessionAnalyzer   session.ThreatAnalyzer
+	anomalyDetector   anomaly.Detector
 	upgrader          websocket.Upgrader
 }
 
@@ -51,16 +53,16 @@ type MCPError struct {
 }
 
 // NewMCPProxy creates a new MCP proxy instance
-func NewMCPProxy(logger *logging.Logger, sanitizerMgr *sanitizer.Manager, complianceMgr *sanitizer.ComplianceManager, upstreamMgr *upstream.Manager, sessionAnalyzer session.ThreatAnalyzer) *MCPProxy {
+func NewMCPProxy(logger *logging.Logger, sanitizerMgr *sanitizer.Manager, complianceMgr *sanitizer.ComplianceManager, upstreamMgr *upstream.Manager, sessionAnalyzer session.ThreatAnalyzer, anomalyDet anomaly.Detector) *MCPProxy {
 	return &MCPProxy{
 		logger:            logger,
 		sanitizer:         sanitizerMgr,
 		complianceManager: complianceMgr,
 		upstreamManager:   upstreamMgr,
 		sessionAnalyzer:   sessionAnalyzer,
+		anomalyDetector:   anomalyDet,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
-				// In production, implement proper origin checking
 				return true
 			},
 		},
@@ -161,6 +163,12 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 		return
 	}
 
+	// Anomaly scoring (optional, opt-in via config)
+	if p.anomalyDetector != nil {
+		anomalyScore := p.anomalyDetector.Score(req.Method + " " + string(paramsJSON))
+		p.logger.Info("Anomaly score", "method", req.Method, "anomaly_score", fmt.Sprintf("%.3f", anomalyScore))
+	}
+
 	// Apply security sanitization
 	sanitizationResult := p.sanitizer.SanitizeContent(string(paramsJSON))
 
@@ -252,22 +260,10 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 	upstreamResp, err := p.upstreamManager.ForwardRequest(c.Request.Context(), upstreamReq)
 	if err != nil {
 		p.logger.Error("Failed to forward request to upstream", "error", err)
-		// Fall back to local handling for some methods, or return error
-		if req.Method == "initialize" {
-			// Handle initialization locally since firewall needs to inject its capabilities
-			response := p.handleInitialize(c.Request.Context(), &req)
-			c.JSON(http.StatusOK, response)
-			return
-		}
-
-		c.JSON(http.StatusBadGateway, MCPResponse{
-			Error: &MCPError{
-				Code:    -32002,
-				Message: "Upstream service unavailable",
-				Data:    err.Error(),
-			},
-			ID: req.ID,
-		})
+		// Fall back to local handling — firewall exposes built-in security tools
+		// for all standard MCP methods when no upstream is reachable.
+		response := p.processMCPMethod(c.Request.Context(), &req)
+		c.JSON(http.StatusOK, response)
 		return
 	}
 
@@ -1142,6 +1138,8 @@ func (p *MCPProxy) HandleWebSocket(c *gin.Context) {
 
 	p.logger.Info("WebSocket connection established", "remote_addr", conn.RemoteAddr())
 
+	sessionID := conn.RemoteAddr().String()
+
 	// Handle WebSocket messages
 	for {
 		messageType, message, err := conn.ReadMessage()
@@ -1150,18 +1148,34 @@ func (p *MCPProxy) HandleWebSocket(c *gin.Context) {
 			break
 		}
 
-		// Process the message through security filters
+		// Session-level threat analysis (multi-turn attack detection)
+		if p.sessionAnalyzer != nil {
+			assessment := p.sessionAnalyzer.AnalyzeMessage(sessionID, "ws-client", string(message))
+			if assessment.BlockConversation {
+				errorResponse := MCPResponse{
+					Error: &MCPError{
+						Code:    -32000,
+						Message: "Session blocked by security policy",
+						Data:    assessment.RecommendedAction,
+					},
+				}
+				errorJSON, _ := json.Marshal(errorResponse)
+				conn.WriteMessage(messageType, errorJSON)
+				conn.Close()
+				return
+			}
+		}
+
+		// Process the message through content security filters
 		sanitized := p.sanitizer.SanitizeContent(string(message))
 
 		if sanitized.Blocked {
-			// Send error response for blocked content
 			errorResponse := MCPResponse{
 				Error: &MCPError{
 					Code:    -32000,
 					Message: "Message blocked by security policy",
 				},
 			}
-
 			errorJSON, _ := json.Marshal(errorResponse)
 			conn.WriteMessage(messageType, errorJSON)
 			continue

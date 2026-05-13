@@ -59,7 +59,7 @@ func setupMCPProxyWithSessionAnalyzer(sessionRisk string) *MCPProxy {
 		}
 	}
 
-	return NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, sessionAnalyzer)
+	return NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, sessionAnalyzer, nil)
 }
 
 func TestTwoTierThreatResponse(t *testing.T) {
@@ -148,7 +148,7 @@ func newMockProxy(mock *MockSessionAnalyzer) *MCPProxy {
 	sanitizerMgr := sanitizer.New(config.Security{}, logger)
 	complianceMgr := sanitizer.NewComplianceManager(config.Compliance{}, logger)
 	upstreamMgr := upstream.NewManager(&config.Upstream{}, logger)
-	return NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, mock)
+	return NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, mock, nil)
 }
 
 func makeTestContext(method string, body []byte) (*httptest.ResponseRecorder, *gin.Context) {
@@ -266,7 +266,7 @@ func TestTwoTierThreatResponseEdgeCases(t *testing.T) {
 		complianceMgr := sanitizer.NewComplianceManager(config.Compliance{}, logger)
 		upstreamMgr := upstream.NewManager(&config.Upstream{}, logger)
 
-		proxy := NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, nil)
+		proxy := NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, nil, nil)
 		body, _ := json.Marshal(MCPRequest{Method: "tools/call", ID: 11})
 		_, c := makeTestContext("POST", body)
 		proxy.HandleMCPRequest(c)

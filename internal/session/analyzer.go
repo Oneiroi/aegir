@@ -17,6 +17,7 @@ type ConversationalThreatAnalyzer struct {
 	logger         *logging.Logger
 	config         AnalyzerConfig
 	attackPatterns map[string]*AttackPattern
+	done           chan struct{}
 }
 
 // SessionContext tracks conversation state and threat indicators
@@ -84,11 +85,31 @@ type ThreatAnalyzer interface {
 
 // NewConversationalThreatAnalyzer creates a new analyzer
 func NewConversationalThreatAnalyzer(config AnalyzerConfig, logger *logging.Logger) *ConversationalThreatAnalyzer {
+	if config.CleanupInterval <= 0 {
+		config.CleanupInterval = 5 * time.Minute
+	}
+	if config.MaxSessionAge <= 0 {
+		config.MaxSessionAge = 30 * time.Minute
+	}
+	if config.MaxHistorySize <= 0 {
+		config.MaxHistorySize = 50
+	}
+	if config.ThreatThreshold <= 0 {
+		config.ThreatThreshold = 0.5
+	}
+	if config.JailbreakThreshold <= 0 {
+		config.JailbreakThreshold = 0.6
+	}
+	if config.RoleEscalationLimit <= 0 {
+		config.RoleEscalationLimit = 3
+	}
+
 	analyzer := &ConversationalThreatAnalyzer{
-		sessions: make(map[string]*SessionContext),
-		logger:   logger,
-		config:   config,
+		sessions:       make(map[string]*SessionContext),
+		logger:         logger,
+		config:         config,
 		attackPatterns: make(map[string]*AttackPattern),
+		done:           make(chan struct{}),
 	}
 
 	// Initialize attack patterns
@@ -491,20 +512,30 @@ func (cta *ConversationalThreatAnalyzer) initializeAttackPatterns() {
 	cta.attackPatterns = patterns
 }
 
-// cleanupRoutine periodically removes old sessions
+// Stop signals the cleanup goroutine to exit. Call when the analyzer is no longer needed.
+func (cta *ConversationalThreatAnalyzer) Stop() {
+	close(cta.done)
+}
+
+// cleanupRoutine periodically removes old sessions until Stop() is called.
 func (cta *ConversationalThreatAnalyzer) cleanupRoutine() {
 	ticker := time.NewTicker(cta.config.CleanupInterval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		cta.mutex.Lock()
-		now := time.Now()
-		for sessionID, session := range cta.sessions {
-			if now.Sub(session.LastActivity) > cta.config.MaxSessionAge {
-				delete(cta.sessions, sessionID)
+	for {
+		select {
+		case <-cta.done:
+			return
+		case <-ticker.C:
+			cta.mutex.Lock()
+			now := time.Now()
+			for sessionID, session := range cta.sessions {
+				if now.Sub(session.LastActivity) > cta.config.MaxSessionAge {
+					delete(cta.sessions, sessionID)
+				}
 			}
+			cta.mutex.Unlock()
 		}
-		cta.mutex.Unlock()
 	}
 }
 

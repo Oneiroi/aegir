@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/aegishjalmur/aegir/internal/anomaly"
 	"github.com/aegishjalmur/aegir/internal/auth"
 	"github.com/aegishjalmur/aegir/internal/config"
 	"github.com/aegishjalmur/aegir/internal/crypto"
@@ -87,8 +88,14 @@ func New(cfg *config.Config) (*MCPFirewall, error) {
 		sessionAnalyzer = session.NewConversationalThreatAnalyzer(analyzerConfig, logger)
 	}
 
+	// Initialize anomaly detector (opt-in via config)
+	var anomalyDetector anomaly.Detector
+	if cfg.Security.AnomalyDetection.Enabled {
+		anomalyDetector = anomaly.NewHeuristicDetector()
+	}
+
 	// Initialize MCP proxy
-	mcpProxy := NewMCPProxy(logger, sanitizerManager, complianceManager, upstreamManager, sessionAnalyzer)
+	mcpProxy := NewMCPProxy(logger, sanitizerManager, complianceManager, upstreamManager, sessionAnalyzer, anomalyDetector)
 
 	// Initialize dashboard statistics collector
 	dashboardStats := dashboard.NewStatsCollector(logger)
