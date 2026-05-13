@@ -1,4 +1,9 @@
 *bin/*
+logs/
+.claude/
+cmd/server/test-aegir
+cmd/server/test-aegir-env
+cmd/server/test-aegir-shutdown
 
 # ── GSD baseline (auto-generated) ──
 .gsd

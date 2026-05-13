@@ -26,12 +26,21 @@ func (w *responseWriter) Write(data []byte) (int, error) {
 // Middleware creates a Gin middleware for dashboard statistics collection
 func (sc *StatsCollector) Middleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Skip the dashboard's own routes — recording them creates phantom self-traffic.
+		path := c.Request.URL.Path
+		if len(path) >= 9 && path[:9] == "/api/dash" ||
+			len(path) >= 10 && path[:10] == "/dashboard" ||
+			path == "/health" ||
+			path == "/metrics" {
+			c.Next()
+			return
+		}
+
 		// Generate unique request ID
 		requestID := generateRequestID()
 
 		// Get request details
 		method := c.Request.Method
-		path := c.Request.URL.Path
 		clientIP := c.ClientIP()
 		userAgent := c.GetHeader("User-Agent")
 
@@ -94,20 +103,9 @@ func RecordAttackInContext(c *gin.Context, category AttackCategory) {
 		}
 	}
 
-	// Add new attack
+	// Add new attack — FinishRequest reads this slice and counts once.
 	attacks = append(attacks, category)
 	c.Set("dashboard_attacks", attacks)
-
-	// Also record globally if collector is available
-	if collector, exists := c.Get("dashboard_collector"); exists {
-		if sc, ok := collector.(*StatsCollector); ok {
-			sc.RecordAttack(category, map[string]interface{}{
-				"path":      c.Request.URL.Path,
-				"client_ip": c.ClientIP(),
-				"method":    c.Request.Method,
-			})
-		}
-	}
 }
 
 // generateRequestID generates a unique request identifier

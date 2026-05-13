@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/aegishjalmur/aegir/internal/dashboard"
 	"github.com/aegishjalmur/aegir/internal/logging"
 	"github.com/aegishjalmur/aegir/internal/sanitizer"
 	"github.com/aegishjalmur/aegir/internal/session"
@@ -93,6 +95,9 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 		paramsJSON, _ := json.Marshal(req.Params)
 		assessment := p.sessionAnalyzer.AnalyzeMessage(sessionID, userID, string(paramsJSON))
 
+		// Bridge session threat patterns → dashboard counters
+		p.recordSessionThreatsToContext(c, assessment.AttackPatterns)
+
 		// Two-tier threat response:
 		// Critical risk (score >= 0.8): Hard block with 403
 		if assessment.ConversationRisk == "critical" {
@@ -158,6 +163,10 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 
 	// Apply security sanitization
 	sanitizationResult := p.sanitizer.SanitizeContent(string(paramsJSON))
+
+	// Bridge sanitizer detections → dashboard counters
+	p.recordDetectionsToContext(c, sanitizationResult.Detections)
+
 	if sanitizationResult.Blocked {
 		p.logger.Warn("MCP request blocked by security filter",
 			"method", req.Method,
@@ -177,6 +186,10 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 
 	// Apply compliance filtering
 	complianceResult := p.complianceManager.ScanForCompliance(string(paramsJSON))
+
+	// Bridge compliance detections → dashboard counters
+	p.recordComplianceToContext(c, complianceResult)
+
 	if complianceResult.ComplianceRisk == "critical" || complianceResult.ComplianceRisk == "high" {
 		p.logger.Warn("MCP request blocked by compliance filter",
 			"method", req.Method,
@@ -1289,6 +1302,80 @@ func (p *MCPProxy) validateResourceURI(uri string) error {
 	}
 
 	return nil
+}
+
+// recordDetectionsToContext maps sanitizer detections to dashboard attack categories.
+// Deduplicates by category so each is counted once per request.
+func (p *MCPProxy) recordDetectionsToContext(c *gin.Context, detections []sanitizer.Detection) {
+	seen := make(map[dashboard.AttackCategory]bool)
+	for _, d := range detections {
+		cat, ok := sanitizerTypeToCategory(d.Type)
+		if ok && !seen[cat] {
+			dashboard.RecordAttackInContext(c, cat)
+			seen[cat] = true
+		}
+	}
+}
+
+// recordSessionThreatsToContext maps session analyzer patterns to dashboard attack categories.
+func (p *MCPProxy) recordSessionThreatsToContext(c *gin.Context, patterns []string) {
+	for _, pattern := range patterns {
+		cat, ok := sessionPatternToCategory(pattern)
+		if ok {
+			dashboard.RecordAttackInContext(c, cat)
+		}
+	}
+}
+
+// recordComplianceToContext records a compliance violation when regulated data is detected.
+func (p *MCPProxy) recordComplianceToContext(c *gin.Context, result *sanitizer.ComplianceResult) {
+	if len(result.PIIDetections) > 0 || len(result.PHIDetections) > 0 || len(result.PCIDetections) > 0 {
+		dashboard.RecordAttackInContext(c, dashboard.AttackComplianceViolation)
+	}
+}
+
+// sanitizerTypeToCategory maps a sanitizer Detection.Type string to a dashboard AttackCategory.
+func sanitizerTypeToCategory(detType string) (dashboard.AttackCategory, bool) {
+	switch {
+	case strings.Contains(detType, "jailbreak") || strings.Contains(detType, "dan"):
+		return dashboard.AttackJailbreak, true
+	case strings.Contains(detType, "role"):
+		return dashboard.AttackRoleEscalation, true
+	case strings.Contains(detType, "emotional"):
+		return dashboard.AttackEmotionalManip, true
+	case strings.Contains(detType, "template") || strings.Contains(detType, "variable"):
+		return dashboard.AttackTemplateInjection, true
+	case strings.HasPrefix(detType, "prompt_injection_"):
+		return dashboard.AttackPromptInjection, true
+	case detType == "command_injection":
+		return dashboard.AttackCommandInjection, true
+	case detType == "xss_attempt":
+		return dashboard.AttackXSS, true
+	case detType == "sql_injection":
+		return dashboard.AttackSQLInjection, true
+	case strings.HasPrefix(detType, "secret_"):
+		return dashboard.AttackSecretExposure, true
+	default:
+		return "", false
+	}
+}
+
+// sessionPatternToCategory maps a ConversationalThreatAnalyzer pattern name to a dashboard AttackCategory.
+func sessionPatternToCategory(pattern string) (dashboard.AttackCategory, bool) {
+	switch pattern {
+	case "role_escalation":
+		return dashboard.AttackRoleEscalation, true
+	case "dan_progression", "developer_mode", "grandmother_exploit":
+		return dashboard.AttackJailbreak, true
+	case "context_poisoning":
+		return dashboard.AttackPromptInjection, true
+	case "distributed_template_injection":
+		return dashboard.AttackTemplateInjection, true
+	case "emotional_manipulation":
+		return dashboard.AttackEmotionalManip, true
+	default:
+		return "", false
+	}
 }
 
 // logMCPRequest logs MCP requests for audit purposes

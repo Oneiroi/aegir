@@ -16,10 +16,19 @@ type Config struct {
 	Server          Server          `json:"server" mapstructure:"server"`
 	Auth            Auth            `json:"auth" mapstructure:"auth"`
 	Logging         Logging         `json:"logging" mapstructure:"logging"`
+	Telemetry       Telemetry       `json:"telemetry" mapstructure:"telemetry"`
 	Security        Security        `json:"security" mapstructure:"security"`
 	Compliance      Compliance      `json:"compliance" mapstructure:"compliance"`
 	SessionAnalysis SessionAnalysis `json:"session_analysis" mapstructure:"session_analysis"`
 	Upstream        Upstream        `json:"upstream" mapstructure:"upstream"`
+}
+
+// Telemetry configuration for OpenTelemetry tracing
+type Telemetry struct {
+	Enabled     bool    `json:"enabled" mapstructure:"enabled"`
+	OutputDir   string  `json:"output_dir" mapstructure:"output_dir"`
+	ServiceName string  `json:"service_name" mapstructure:"service_name"`
+	SampleRate  float64 `json:"sample_rate" mapstructure:"sample_rate"`
 }
 
 // Server configuration
@@ -91,96 +100,96 @@ type Logging struct {
 
 // Security configuration
 type Security struct {
-	RateLimit         RateLimit         `json:"rate_limit"`
-	Sanitization      Sanitization      `json:"sanitization"`
-	Encryption        Encryption        `json:"encryption"`
-	SecretDetection   SecretDetection   `json:"secret_detection"`
-	CommandInjection  CommandInjection  `json:"command_injection"`
+	RateLimit         RateLimit         `json:"rate_limit"         mapstructure:"rate_limit"`
+	Sanitization      Sanitization      `json:"sanitization"       mapstructure:"sanitization"`
+	Encryption        Encryption        `json:"encryption"         mapstructure:"encryption"`
+	SecretDetection   SecretDetection   `json:"secret_detection"   mapstructure:"secret_detection"`
+	CommandInjection  CommandInjection  `json:"command_injection"  mapstructure:"command_injection"`
 }
 
 // RateLimit configuration
 type RateLimit struct {
-	Enabled         bool `json:"enabled"`
-	RequestsPerMin  int  `json:"requests_per_min"`
-	BurstSize       int  `json:"burst_size"`
-	CleanupInterval int  `json:"cleanup_interval"`
+	Enabled         bool `json:"enabled"          mapstructure:"enabled"`
+	RequestsPerMin  int  `json:"requests_per_min" mapstructure:"requests_per_min"`
+	BurstSize       int  `json:"burst_size"       mapstructure:"burst_size"`
+	CleanupInterval int  `json:"cleanup_interval" mapstructure:"cleanup_interval"`
 }
 
 // Sanitization configuration
 type Sanitization struct {
-	Enabled           bool `json:"enabled"`
-	XSSPrevention     bool `json:"xss_prevention"`
-	SQLInjection      bool `json:"sql_injection"`
-	HomoglyphFilter   bool `json:"homoglyph_filter"`
-	FormulaDetection  bool `json:"formula_detection"`
-	PromptInjection   bool `json:"prompt_injection"`
+	Enabled           bool `json:"enabled"            mapstructure:"enabled"`
+	XSSPrevention     bool `json:"xss_prevention"     mapstructure:"xss_prevention"`
+	SQLInjection      bool `json:"sql_injection"      mapstructure:"sql_injection"`
+	HomoglyphFilter   bool `json:"homoglyph_filter"   mapstructure:"homoglyph_filter"`
+	FormulaDetection  bool `json:"formula_detection"  mapstructure:"formula_detection"`
+	PromptInjection   bool `json:"prompt_injection"   mapstructure:"prompt_injection"`
 }
 
 // Encryption configuration
 type Encryption struct {
-	Algorithm    string `json:"algorithm"`
-	KeySize      int    `json:"key_size"`
-	KeyRotation  int    `json:"key_rotation_days"`
-	HardwareHSM  bool   `json:"hardware_hsm"`
-	CloudKMS     string `json:"cloud_kms"`
+	Algorithm    string `json:"algorithm"   mapstructure:"algorithm"`
+	KeySize      int    `json:"key_size"    mapstructure:"key_size"`
+	KeyRotation  int    `json:"key_rotation_days" mapstructure:"key_rotation_days"`
+	HardwareHSM  bool   `json:"hardware_hsm" mapstructure:"hardware_hsm"`
+	CloudKMS     string `json:"cloud_kms"   mapstructure:"cloud_kms"`
 }
 
 // SecretDetection configuration
 type SecretDetection struct {
-	Enabled       bool     `json:"enabled"`
-	APIKeys       bool     `json:"api_keys"`
-	SSHKeys       bool     `json:"ssh_keys"`
-	Certificates  bool     `json:"certificates"`
-	Passwords     bool     `json:"passwords"`
-	CustomPatterns []string `json:"custom_patterns"`
+	Enabled        bool     `json:"enabled"         mapstructure:"enabled"`
+	APIKeys        bool     `json:"api_keys"        mapstructure:"api_keys"`
+	SSHKeys        bool     `json:"ssh_keys"        mapstructure:"ssh_keys"`
+	Certificates   bool     `json:"certificates"    mapstructure:"certificates"`
+	Passwords      bool     `json:"passwords"       mapstructure:"passwords"`
+	CustomPatterns []string `json:"custom_patterns" mapstructure:"custom_patterns"`
 }
 
 // CommandInjection configuration
 type CommandInjection struct {
-	Enabled           bool     `json:"enabled"`
-	BlockList         []string `json:"block_list"`
-	AllowList         []string `json:"allow_list"`
-	StrictMode        bool     `json:"strict_mode"`
+	Enabled    bool     `json:"enabled"     mapstructure:"enabled"`
+	BlockList  []string `json:"block_list"  mapstructure:"block_list"`
+	AllowList  []string `json:"allow_list"  mapstructure:"allow_list"`
+	StrictMode bool     `json:"strict_mode" mapstructure:"strict_mode"`
 }
 
 // Compliance configuration
 type Compliance struct {
-	HIPAA HIPAAConfig `json:"hipaa"`
-	PCI   PCIConfig   `json:"pci"`
-	GDPR  GDPRConfig  `json:"gdpr"`
-	SOC2  SOC2Config  `json:"soc2"`
+	HIPAA HIPAAConfig `json:"hipaa" mapstructure:"hipaa"`
+	PCI   PCIConfig   `json:"pci"   mapstructure:"pci"`
+	GDPR  GDPRConfig  `json:"gdpr"  mapstructure:"gdpr"`
+	SOC2  SOC2Config  `json:"soc2"  mapstructure:"soc2"`
 }
 
 // HIPAAConfig for HIPAA compliance
 type HIPAAConfig struct {
-	Enabled     bool `json:"enabled"`
-	PHIDetection bool `json:"phi_detection"`
-	Encryption  bool `json:"encryption"`
-	AuditTrail  bool `json:"audit_trail"`
+	Enabled      bool `json:"enabled"       mapstructure:"enabled"`
+	PHIDetection bool `json:"phi_detection" mapstructure:"phi_detection"`
+	Encryption   bool `json:"encryption"    mapstructure:"encryption"`
+	AuditTrail   bool `json:"audit_trail"   mapstructure:"audit_trail"`
 }
 
 // PCIConfig for PCI DSS compliance
 type PCIConfig struct {
-	Enabled        bool `json:"enabled"`
-	CardDetection  bool `json:"card_detection"`
-	TokenizeCards  bool `json:"tokenize_cards"`
-	EncryptStorage bool `json:"encrypt_storage"`
+	Enabled        bool `json:"enabled"         mapstructure:"enabled"`
+	CardDetection  bool `json:"card_detection"  mapstructure:"card_detection"`
+	TokenizeCards  bool `json:"tokenize_cards"  mapstructure:"tokenize_cards"`
+	EncryptStorage bool `json:"encrypt_storage" mapstructure:"encrypt_storage"`
 }
 
 // GDPRConfig for GDPR compliance
 type GDPRConfig struct {
-	Enabled       bool   `json:"enabled"`
-	PIIDetection  bool   `json:"pii_detection"`
-	RightToErasure bool  `json:"right_to_erasure"`
-	DataPortability bool `json:"data_portability"`
-	ConsentTracking bool `json:"consent_tracking"`
-	Region         string `json:"region"`
+	Enabled         bool   `json:"enabled"          mapstructure:"enabled"`
+	PIIDetection    bool   `json:"pii_detection"    mapstructure:"pii_detection"`
+	RightToErasure  bool   `json:"right_to_erasure" mapstructure:"right_to_erasure"`
+	DataPortability bool   `json:"data_portability" mapstructure:"data_portability"`
+	ConsentTracking bool   `json:"consent_tracking" mapstructure:"consent_tracking"`
+	Region          string `json:"region"           mapstructure:"region"`
 }
 
 // SOC2Config for SOC 2 compliance
 type SOC2Config struct {
-	Enabled bool `json:"enabled"`
-	Type2   bool `json:"type2"`
+	Enabled bool `json:"enabled" mapstructure:"enabled"`
+	Type2   bool `json:"type2"   mapstructure:"type2"`
 }
 
 // SessionAnalysis configuration for conversational threat detection
@@ -430,6 +439,12 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("logging.hmac_key", generateRandomSecret())
 	v.SetDefault("logging.integrity_checks", true)
 
+	// Telemetry defaults
+	v.SetDefault("telemetry.enabled", false)
+	v.SetDefault("telemetry.output_dir", "logs/traces")
+	v.SetDefault("telemetry.service_name", "aegir-mcp-firewall")
+	v.SetDefault("telemetry.sample_rate", 1.0)
+
 	// Security defaults
 	v.SetDefault("security.rate_limit.enabled", true)
 	v.SetDefault("security.rate_limit.requests_per_min", 100)
@@ -601,6 +616,12 @@ func LoadLegacy() (*Config, error) {
 			Compress:        getEnvAsBool("LOG_COMPRESS", true),
 			HMACKey:         getEnv("LOG_HMAC_KEY", generateRandomSecret()),
 			IntegrityChecks: getEnvAsBool("LOG_INTEGRITY_CHECKS", true),
+		},
+		Telemetry: Telemetry{
+			Enabled:     getEnvAsBool("OTEL_ENABLED", false),
+			OutputDir:   getEnv("OTEL_OUTPUT_DIR", "logs/traces"),
+			ServiceName: getEnv("OTEL_SERVICE_NAME", "aegir-mcp-firewall"),
+			SampleRate:  getEnvAsFloat("OTEL_SAMPLE_RATE", 1.0),
 		},
 		Security: Security{
 			RateLimit: RateLimit{

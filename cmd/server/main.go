@@ -14,6 +14,7 @@ import (
 
 	"github.com/aegishjalmur/aegir/internal/config"
 	"github.com/aegishjalmur/aegir/internal/server"
+	"github.com/aegishjalmur/aegir/internal/telemetry"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 )
@@ -105,9 +106,36 @@ func main() {
 	}
 }
 
+// initTelemetry initialises the OTEL provider and returns a shutdown function.
+func initTelemetry(cfg *config.Config) func() {
+	tp, err := telemetry.New(telemetry.Config{
+		Enabled:     cfg.Telemetry.Enabled,
+		OutputDir:   cfg.Telemetry.OutputDir,
+		ServiceName: cfg.Telemetry.ServiceName,
+		SampleRate:  cfg.Telemetry.SampleRate,
+	})
+	if err != nil {
+		log.Printf("Warning: failed to initialise OTEL: %v — tracing disabled", err)
+		return func() {}
+	}
+	if cfg.Telemetry.Enabled {
+		log.Printf("OTEL tracing enabled, writing spans to %s", cfg.Telemetry.OutputDir)
+	}
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tp.Shutdown(ctx); err != nil {
+			log.Printf("Warning: OTEL shutdown error: %v", err)
+		}
+	}
+}
+
 // runSTDIOMode runs the server in STDIO mode
 func runSTDIOMode(cfg *config.Config) {
 	log.Println("Starting MCP Firewall in STDIO mode")
+
+	shutdownTelemetry := initTelemetry(cfg)
+	defer shutdownTelemetry()
 
 	// Initialize components for STDIO mode
 	mcpServer, err := server.New(cfg)
@@ -137,6 +165,9 @@ func runHTTPMode(cfg *config.Config, transport string) {
 	if cfg.Environment == "production" {
 		gin.SetMode(gin.ReleaseMode)
 	}
+
+	shutdownTelemetry := initTelemetry(cfg)
+	defer shutdownTelemetry()
 
 	// Initialize the MCP firewall server
 	mcpServer, err := server.New(cfg)

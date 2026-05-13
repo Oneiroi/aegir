@@ -88,6 +88,11 @@ func (m *Manager) SanitizeContent(content string) *SanitizationResult {
 	// Determine final risk level
 	result.Risk = m.calculateRiskLevel(result.Detections)
 
+	// Block on high and critical risk
+	if result.Risk == "critical" || result.Risk == "high" {
+		result.Blocked = true
+	}
+
 	// Log security events if detections were made
 	if len(result.Detections) > 0 {
 		m.logSecurityEvent(result)
@@ -298,7 +303,7 @@ func (m *Manager) detectHomoglyphs(content string, result *SanitizationResult) s
 
 // detectSpreadsheetFormulas detects potentially malicious spreadsheet formulas
 func (m *Manager) detectSpreadsheetFormulas(content string, result *SanitizationResult) string {
-	patterns := []string{`^=`, `^+`, `^-`, `^@`}
+	patterns := []string{`^=`, `^\+`, `^-`, `^@`}
 
 	for _, pattern := range patterns {
 		re := regexp.MustCompile(pattern)

@@ -86,6 +86,15 @@ type Dashboard struct {
 	LastUpdated        time.Time `json:"last_updated"`
 }
 
+// requestMeta holds per-request metadata captured at request start.
+type requestMeta struct {
+	startTime time.Time
+	method    string
+	path      string
+	clientIP  string
+	userAgent string
+}
+
 // StatsCollector collects and maintains dashboard statistics
 type StatsCollector struct {
 	mu           sync.RWMutex
@@ -94,7 +103,7 @@ type StatsCollector struct {
 
 	// Internal tracking
 	requestTimes      []time.Duration
-	requestStartTimes map[string]time.Time
+	requestStartTimes map[string]requestMeta
 	rpsCalculator     *rpsCalculator
 }
 
@@ -118,7 +127,7 @@ func NewStatsCollector(logger *logging.Logger) *StatsCollector {
 			LastUpdated:         now,
 		},
 		logger:            logger,
-		requestStartTimes: make(map[string]time.Time),
+		requestStartTimes: make(map[string]requestMeta),
 		requestTimes:      make([]time.Duration, 0, 1000),
 		rpsCalculator:     newRPSCalculator(60 * time.Second), // 1-minute window
 	}
@@ -139,8 +148,14 @@ func (sc *StatsCollector) RecordRequest(requestID, method, path, clientIP, userA
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 
-	// Track request start
-	sc.requestStartTimes[requestID] = now
+	// Track request start with full metadata
+	sc.requestStartTimes[requestID] = requestMeta{
+		startTime: now,
+		method:    method,
+		path:      path,
+		clientIP:  clientIP,
+		userAgent: userAgent,
+	}
 
 	// Increment counters
 	atomic.AddUint64(&sc.dashboard.TotalRequests, 1)
@@ -170,15 +185,15 @@ func (sc *StatsCollector) FinishRequest(requestID string, statusCode int, bytesI
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 
-	// Get start time
-	startTime, exists := sc.requestStartTimes[requestID]
+	// Get start time and metadata
+	meta, exists := sc.requestStartTimes[requestID]
 	if !exists {
 		return
 	}
 	delete(sc.requestStartTimes, requestID)
 
 	// Calculate duration
-	duration := now.Sub(startTime)
+	duration := now.Sub(meta.startTime)
 
 	// Update request times
 	sc.requestTimes = append(sc.requestTimes, duration)
@@ -199,8 +214,12 @@ func (sc *StatsCollector) FinishRequest(requestID string, statusCode int, bytesI
 
 	// Create request stats
 	requestStats := RequestStats{
-		StartTime:    startTime,
+		StartTime:    meta.startTime,
 		Duration:     duration,
+		Method:       meta.method,
+		Path:         meta.path,
+		ClientIP:     meta.clientIP,
+		UserAgent:    meta.userAgent,
 		StatusCode:   statusCode,
 		BytesIn:      bytesIn,
 		BytesOut:     bytesOut,

@@ -15,6 +15,9 @@ import (
 	"github.com/aegishjalmur/aegir/internal/upstream"
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 // MCPFirewall represents the main server instance
@@ -128,6 +131,7 @@ func (s *MCPFirewall) setupRouter() {
 
 	// Security middleware
 	s.router.Use(s.securityHeaders())
+	s.router.Use(s.otelMiddleware())
 	s.router.Use(s.loggingMiddleware())
 	s.router.Use(gin.Recovery())
 
@@ -164,12 +168,14 @@ func (s *MCPFirewall) setupRouter() {
 		}
 
 		// Dashboard API endpoints (protected)
-		s.dashboardAPI.RegisterRoutes(api)
+		protectedDashboard := api.Group("/")
+		protectedDashboard.Use(s.auth.AuthMiddleware())
+		s.dashboardAPI.RegisterRoutes(protectedDashboard)
 	}
 
-	// Dashboard web interface (protected with authentication)
+	// Dashboard web interface (unprotected - login handled client-side)
 	webDashboard := s.router.Group("/")
-	webDashboard.Use(s.auth.AuthMiddleware())
+	// No auth middleware - login form handles auth client-side
 	s.dashboardAPI.RegisterWebRoutes(webDashboard)
 
 	// MCP proxy endpoints
@@ -195,6 +201,25 @@ func (s *MCPFirewall) setupRouter() {
 			auth.GET("/oauth/callback", s.auth.OAuthCallback)
 			auth.GET("/oauth/login", s.auth.OAuthLogin)
 		}
+	}
+}
+
+// otelMiddleware creates an OTEL span for each HTTP request.
+func (s *MCPFirewall) otelMiddleware() gin.HandlerFunc {
+	tracer := otel.Tracer("aegir-mcp-firewall")
+	return func(c *gin.Context) {
+		ctx, span := tracer.Start(c.Request.Context(), c.Request.URL.Path,
+			oteltrace.WithSpanKind(oteltrace.SpanKindServer),
+			oteltrace.WithAttributes(
+				attribute.String("http.method", c.Request.Method),
+				attribute.String("http.url", c.Request.URL.String()),
+				attribute.String("http.client_ip", c.ClientIP()),
+			),
+		)
+		c.Request = c.Request.WithContext(ctx)
+		c.Next()
+		span.SetAttributes(attribute.Int("http.status_code", c.Writer.Status()))
+		span.End()
 	}
 }
 

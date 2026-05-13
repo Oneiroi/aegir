@@ -1,4 +1,4 @@
-.PHONY: build run run-stdio run-sse test clean dev dev-stdio lint certs
+.PHONY: build run run-stdio run-sse demo test clean dev dev-stdio lint certs
 
 # Build the application
 build:
@@ -24,13 +24,17 @@ dev: certs
 dev-stdio:
 	go run ./cmd/server -transport stdio
 
+# Demo mode - runs with TLS disabled for quick testing
+demo: build
+	TLS_ENABLED=false RATE_LIMIT_ENABLED=false go run ./cmd/server
+
 # Run tests
 test:
 	go test -v ./...
 
 # Clean build artifacts
 clean:
-	rm -rf bin/
+	rm -f bin/aegir bin/mcp-firewall
 
 # Lint the code
 lint:

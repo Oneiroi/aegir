@@ -2,6 +2,8 @@
 
 A comprehensive security gateway for Model Context Protocol (MCP) servers that implements enterprise-grade security controls, compliance frameworks, and threat protection.
 
+**Name origin:** Norse mythology - Aegir is the god of the sea, controlling what enters and leaves. This project acts as a similar boundary protector for MCP traffic.
+
 ## Features
 
 ### 🔐 Security Controls
