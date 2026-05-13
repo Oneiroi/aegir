@@ -318,6 +318,7 @@ func (s *MCPFirewall) getMetrics(c *gin.Context) {
 		"uptime": gin.H{
 			"status": "healthy",
 		},
+		"anomaly_scores": s.mcpProxy.GetAnomalyStats(),
 	})
 }
 

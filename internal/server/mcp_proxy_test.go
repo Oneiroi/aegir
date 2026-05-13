@@ -18,7 +18,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func createTestMCPProxy() *MCPProxy {
+func createTestMCPProxy(t testing.TB) *MCPProxy {
+	t.Helper()
 	// Create test logger
 	logCfg := config.Logging{
 		Level:           "info",
@@ -58,12 +59,13 @@ func createTestMCPProxy() *MCPProxy {
 		RoleEscalationLimit: 3,
 	}
 	sessionAnalyzer := session.NewConversationalThreatAnalyzer(sessionCfg, logger)
+	t.Cleanup(sessionAnalyzer.Stop)
 
 	return NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, sessionAnalyzer, nil)
 }
 
 func TestMCPInitialize(t *testing.T) {
-	proxy := createTestMCPProxy()
+	proxy := createTestMCPProxy(t)
 
 	// Create test request
 	req := MCPRequest{
@@ -113,7 +115,7 @@ func TestMCPInitialize(t *testing.T) {
 }
 
 func TestMCPSecurityFiltering(t *testing.T) {
-	proxy := createTestMCPProxy()
+	proxy := createTestMCPProxy(t)
 
 	// Create test request with malicious content
 	req := MCPRequest{
@@ -164,7 +166,7 @@ func TestMCPSecurityFiltering(t *testing.T) {
 }
 
 func TestMCPComplianceFiltering(t *testing.T) {
-	proxy := createTestMCPProxy()
+	proxy := createTestMCPProxy(t)
 
 	// Create test request with sensitive data
 	req := MCPRequest{
@@ -211,7 +213,7 @@ func TestMCPComplianceFiltering(t *testing.T) {
 }
 
 func TestMCPToolsList(t *testing.T) {
-	proxy := createTestMCPProxy()
+	proxy := createTestMCPProxy(t)
 
 	req := MCPRequest{
 		Method: "tools/list",
@@ -284,7 +286,7 @@ func TestMCPToolsList(t *testing.T) {
 }
 
 func TestMCPSecurityScanTool(t *testing.T) {
-	proxy := createTestMCPProxy()
+	proxy := createTestMCPProxy(t)
 
 	req := MCPRequest{
 		Method: "tools/call",
@@ -376,7 +378,7 @@ func containsSecurityReplacement(content string) bool {
 // Test the new SSE endpoints in server routing
 func TestServerSSEEndpoints(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	proxy := createTestMCPProxy()
+	proxy := createTestMCPProxy(t)
 
 	// Create test router with SSE endpoints
 	router := gin.New()
@@ -440,7 +442,7 @@ func TestServerSSEEndpoints(t *testing.T) {
 // Test WebSocket endpoint (ensure it still works with new additions)
 func TestWebSocketEndpoint(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	proxy := createTestMCPProxy()
+	proxy := createTestMCPProxy(t)
 
 	// Create test router
 	router := gin.New()
@@ -471,7 +473,7 @@ func TestWebSocketEndpoint(t *testing.T) {
 // Test that all transport endpoints coexist properly
 func TestTransportEndpointsCoexistence(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	proxy := createTestMCPProxy()
+	proxy := createTestMCPProxy(t)
 
 	// Create test router with all endpoints
 	router := gin.New()
@@ -658,7 +660,7 @@ func TestTwoTierThreatResponseRealHTTP(t *testing.T) {
 // Benchmark test for transport performance comparison
 func BenchmarkTransportPerformance(b *testing.B) {
 	gin.SetMode(gin.TestMode)
-	proxy := createTestMCPProxy()
+	proxy := createTestMCPProxy(b)
 
 	// Create test router
 	router := gin.New()

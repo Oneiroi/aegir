@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/aegishjalmur/aegir/internal/anomaly"
@@ -29,6 +31,25 @@ type MCPProxy struct {
 	sessionAnalyzer   session.ThreatAnalyzer
 	anomalyDetector   anomaly.Detector
 	upgrader          websocket.Upgrader
+	anomalyCount      atomic.Uint64
+	anomalyScoreSum   atomic.Uint64 // stored as score*1e6 to avoid float atomics
+}
+
+// AnomalyStats holds aggregate anomaly scoring data for metrics.
+type AnomalyStats struct {
+	TotalScored uint64  `json:"total_scored"`
+	AverageScore float64 `json:"average_score"`
+}
+
+// GetAnomalyStats returns aggregate anomaly scoring statistics.
+func (p *MCPProxy) GetAnomalyStats() AnomalyStats {
+	count := p.anomalyCount.Load()
+	sum := p.anomalyScoreSum.Load()
+	avg := 0.0
+	if count > 0 {
+		avg = math.Round(float64(sum)/float64(count)/1e6*1000) / 1000
+	}
+	return AnomalyStats{TotalScored: count, AverageScore: avg}
 }
 
 // MCPRequest represents an incoming MCP request
@@ -166,6 +187,8 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 	// Anomaly scoring (optional, opt-in via config)
 	if p.anomalyDetector != nil {
 		anomalyScore := p.anomalyDetector.Score(req.Method + " " + string(paramsJSON))
+		p.anomalyCount.Add(1)
+		p.anomalyScoreSum.Add(uint64(anomalyScore * 1e6))
 		p.logger.Info("Anomaly score", "method", req.Method, "anomaly_score", fmt.Sprintf("%.3f", anomalyScore))
 	}
 
