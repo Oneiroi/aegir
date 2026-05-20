@@ -37,3 +37,4 @@ vendor/
 coverage/
 .cache/
 tmp/
+.gocache/
