@@ -7,13 +7,74 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/aegishjalmur/aegir/internal/config"
 	"github.com/aegishjalmur/aegir/internal/logging"
 )
+
+// secureDialContext is a net.Dialer-compatible DialContext that defends against
+// DNS rebinding (TOCTOU) attacks by resolving the destination host once,
+// validating every resolved IP against the SSRF policy enforced by
+// validateResourceURI, and then dialing the validated IP directly so that
+// the network stack does not perform a second resolution at connection time.
+func secureDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid address %q: %w", addr, err)
+	}
+
+	// Reject internal hostnames at the dial layer too. validateResourceURI
+	// already catches these at parse time, but defence-in-depth.
+	lower := strings.ToLower(host)
+	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") || lower == "metadata.google.internal" {
+		return nil, fmt.Errorf("SSRF blocked: internal hostname %q is not allowed", host)
+	}
+
+	// If the host is already a literal IP, validate it directly. Otherwise
+	// resolve once and validate every returned address.
+	var addrs []string
+	if ip := net.ParseIP(host); ip != nil {
+		if isRestrictedIP(ip) {
+			return nil, fmt.Errorf("SSRF blocked: IP %s is in a restricted range", ip.String())
+		}
+		addrs = []string{ip.String()}
+	} else {
+		resolved, lookupErr := net.DefaultResolver.LookupHost(ctx, host)
+		if lookupErr != nil {
+			return nil, fmt.Errorf("dns lookup failed for %q: %w", host, lookupErr)
+		}
+		if len(resolved) == 0 {
+			return nil, fmt.Errorf("dns lookup returned no addresses for %q", host)
+		}
+		for _, a := range resolved {
+			ip := net.ParseIP(a)
+			if ip == nil {
+				return nil, fmt.Errorf("SSRF blocked: resolver returned unparseable address %q for %q", a, host)
+			}
+			if isRestrictedIP(ip) {
+				return nil, fmt.Errorf("SSRF blocked: hostname %q resolved to restricted IP %s", host, ip.String())
+			}
+		}
+		addrs = resolved
+	}
+
+	// Dial the first validated address directly so the kernel cannot perform
+	// a second DNS lookup that might return an attacker-controlled IP.
+	dialer := &net.Dialer{Timeout: 30 * time.Second}
+	return dialer.DialContext(ctx, network, net.JoinHostPort(addrs[0], port))
+}
+
+// isRestrictedIP mirrors the SSRF policy enforced by validateResourceURI in
+// the server package. Any change here must be mirrored there.
+func isRestrictedIP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsPrivate() || ip.IsUnspecified() || ip.IsMulticast()
+}
 
 // ServiceState represents the current state of an upstream service
 type ServiceState struct {
@@ -75,6 +136,9 @@ func NewManager(config *config.Upstream, logger *logging.Logger) *Manager {
 		services: make(map[string]*ServiceState),
 		httpClient: &http.Client{
 			Timeout: time.Duration(config.HealthCheck.Timeout) * time.Second,
+			Transport: &http.Transport{
+				DialContext: secureDialContext,
+			},
 		},
 	}
 
@@ -311,7 +375,12 @@ func (m *Manager) forwardRequest(ctx context.Context, service *ServiceState, req
 
 // createHTTPClient creates an HTTP client with appropriate TLS and timeout settings
 func (m *Manager) createHTTPClient(service *ServiceState) *http.Client {
-	transport := &http.Transport{}
+	// Apply the same DNS-rebinding-resistant dialer here. This client is the
+	// one used by ForwardRequest and checkServiceHealth, so the SSRF policy
+	// must be enforced at this layer as well.
+	transport := &http.Transport{
+		DialContext: secureDialContext,
+	}
 
 	if service.Service.TLS.Enabled {
 		tlsConfig := &tls.Config{
