@@ -11,22 +11,28 @@ import (
 	"github.com/aegishjalmur/aegir/internal/logging"
 )
 
+type compiledPattern struct {
+	re       *regexp.Regexp
+	severity string
+}
+
 // ComplianceManager handles compliance-specific data detection and redaction
 type ComplianceManager struct {
-	config        config.Compliance
-	logger        *logging.Logger
-	piiPatterns   map[string]*regexp.Regexp
-	phiPatterns   map[string]*regexp.Regexp
-	pciPatterns   map[string]*regexp.Regexp
+	config      config.Compliance
+	logger      *logging.Logger
+	piiPatterns map[string]compiledPattern
+	phiPatterns map[string]compiledPattern
+	pciPatterns map[string]compiledPattern
+	digitRe     *regexp.Regexp
 }
 
 // ComplianceResult contains compliance scanning results
 type ComplianceResult struct {
-	PIIDetections []Detection `json:"pii_detections"`
-	PHIDetections []Detection `json:"phi_detections"`
-	PCIDetections []Detection `json:"pci_detections"`
-	Sanitized     string      `json:"sanitized"`
-	ComplianceRisk string     `json:"compliance_risk"`
+	PIIDetections  []Detection `json:"pii_detections"`
+	PHIDetections  []Detection `json:"phi_detections"`
+	PCIDetections  []Detection `json:"pci_detections"`
+	Sanitized      string      `json:"sanitized"`
+	ComplianceRisk string      `json:"compliance_risk"`
 	Violations     []Violation `json:"violations"`
 }
 
@@ -43,13 +49,9 @@ type Violation struct {
 // NewComplianceManager creates a new compliance manager
 func NewComplianceManager(config config.Compliance, logger *logging.Logger) *ComplianceManager {
 	cm := &ComplianceManager{
-		config:      config,
-		logger:      logger,
-		piiPatterns: make(map[string]*regexp.Regexp),
-		phiPatterns: make(map[string]*regexp.Regexp),
-		pciPatterns: make(map[string]*regexp.Regexp),
+		config: config,
+		logger: logger,
 	}
-
 	cm.initializePatterns()
 	return cm
 }
@@ -57,12 +59,12 @@ func NewComplianceManager(config config.Compliance, logger *logging.Logger) *Com
 // ScanForCompliance scans content for compliance violations
 func (cm *ComplianceManager) ScanForCompliance(content string) *ComplianceResult {
 	result := &ComplianceResult{
-		Sanitized:     content,
+		Sanitized:      content,
 		ComplianceRisk: "low",
-		PIIDetections: []Detection{},
-		PHIDetections: []Detection{},
-		PCIDetections: []Detection{},
-		Violations:    []Violation{},
+		PIIDetections:  []Detection{},
+		PHIDetections:  []Detection{},
+		PCIDetections:  []Detection{},
+		Violations:     []Violation{},
 	}
 
 	// PCI DSS Card Data Detection — must run before PII so card numbers
@@ -96,52 +98,8 @@ func (cm *ComplianceManager) ScanForCompliance(content string) *ComplianceResult
 func (cm *ComplianceManager) detectPII(result *ComplianceResult) *ComplianceResult {
 	content := result.Sanitized
 
-	// PII patterns for GDPR/CCPA
-	piiPatterns := map[string]struct {
-		regex    string
-		severity string
-	}{
-		"ssn": {
-			regex:    `\b(?:\d{3}[-\s]\d{2}[-\s]\d{4}|\d{9})\b`,
-			severity: "high",
-		},
-		"email": {
-			regex:    `\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b`,
-			severity: "medium",
-		},
-		"phone": {
-			regex:    `\b(?:\+?1[-.\s]?)?\(?([0-9]{3})\)?[-.\s]?([0-9]{3})[-.\s]?([0-9]{4})\b`,
-			severity: "medium",
-		},
-		"phone_intl": {
-			regex:    `\+\d{1,3}[\s.-](?:\d[\s.-]?){5,14}\d`,
-			severity: "medium",
-		},
-		"ip_address": {
-			regex:    `\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b`,
-			severity: "low",
-		},
-		"ipv6_address": {
-			regex:    `\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b`,
-			severity: "low",
-		},
-		"address": {
-			regex:    `\b\d+\s+[A-Za-z0-9\s,.-]+(?:Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Lane|Ln|Boulevard|Blvd|Way)\b`,
-			severity: "medium",
-		},
-		"passport": {
-			regex:    `\b(?:[A-Z]{1,2}[0-9]{6,9}|[0-9]{9}[A-Z]{2})\b`,
-			severity: "high",
-		},
-		"drivers_license": {
-			regex:    `\b[A-Z]{1,2}[0-9]{6,8}\b`,
-			severity: "high",
-		},
-	}
-
-	for patternName, pattern := range piiPatterns {
-		re := regexp.MustCompile(pattern.regex)
-		matches := re.FindAllStringIndex(content, -1)
+	for patternName, cp := range cm.piiPatterns {
+		matches := cp.re.FindAllStringIndex(content, -1)
 
 		for _, match := range matches {
 			detection := Detection{
@@ -149,14 +107,14 @@ func (cm *ComplianceManager) detectPII(result *ComplianceResult) *ComplianceResu
 				Pattern:     patternName,
 				Replacement: "PII_REDACTED",
 				Position:    match[0],
-				Severity:    pattern.severity,
+				Severity:    cp.severity,
 			}
 			result.PIIDetections = append(result.PIIDetections, detection)
 
 			violation := Violation{
 				Type:        "pii",
 				Regulation:  "GDPR/CCPA",
-				Severity:    pattern.severity,
+				Severity:    cp.severity,
 				Description: "Personally Identifiable Information detected: " + patternName,
 				Pattern:     patternName,
 				Position:    match[0],
@@ -164,8 +122,7 @@ func (cm *ComplianceManager) detectPII(result *ComplianceResult) *ComplianceResu
 			result.Violations = append(result.Violations, violation)
 		}
 
-		// Redact PII if configured
-		content = re.ReplaceAllString(content, "PII_REDACTED")
+		content = cp.re.ReplaceAllString(content, "PII_REDACTED")
 	}
 
 	result.Sanitized = content
@@ -176,52 +133,8 @@ func (cm *ComplianceManager) detectPII(result *ComplianceResult) *ComplianceResu
 func (cm *ComplianceManager) detectPHI(result *ComplianceResult) *ComplianceResult {
 	content := result.Sanitized
 
-	// PHI patterns for HIPAA
-	phiPatterns := map[string]struct {
-		regex    string
-		severity string
-	}{
-		"mrn": {
-			regex:    `\b(?:MRN|Medical Record|Patient ID)[\s:]+([A-Z0-9]{6,12})\b`,
-			severity: "critical",
-		},
-		"health_plan": {
-			regex:    `\b(?:Health Plan|Insurance|Policy)[\s#:]+([A-Z0-9]{8,15})\b`,
-			severity: "high",
-		},
-		"diagnosis_code": {
-			regex:    `\b[A-Z]\d{2}(?:\.\d{1,4})?\b`, // ICD-10 format (decimal optional)
-			severity: "high",
-		},
-		"medicare_id": {
-			regex:    `\b\d[A-Z0-9]{3}-[A-Z0-9]{2}\d-[A-Z0-9]{2}\d{2}\b`, // Medicare Beneficiary ID
-			severity: "critical",
-		},
-		"genetic_info": {
-			regex:    `\b(?:BRCA[12]|TP53|KRAS|EGFR|ALK|BRAF|HER2|MLH1|MSH2)\b.*?(?:mutation|variant|deletion|insertion|c\.\d)`,
-			severity: "critical",
-		},
-		"health_condition_phi": {
-			regex:    `(?i)\b(?:patient|diagnosed|diagnosis)\b.{0,50}\b(?:cancer|tumor|diabetes|hypertension|HIV|AIDS|hepatitis|dementia|schizophrenia|chemotherapy|radiation therapy)\b`,
-			severity: "high",
-		},
-		"dob_phi": {
-			regex:    `\b(?:DOB|Date of Birth)[\s:]+(\d{1,2}[/-]\d{1,2}[/-]\d{4})\b`,
-			severity: "high",
-		},
-		"biometric": {
-			regex:    `\b(?:fingerprint|retina|DNA|biometric)[\s:]+([A-Z0-9]+)\b`,
-			severity: "critical",
-		},
-		"device_identifier": {
-			regex:    `\b(?:device|implant|serial)(?:\s+\w+)?[\s#:]+([A-Z0-9]{8,20})\b`,
-			severity: "medium",
-		},
-	}
-
-	for patternName, pattern := range phiPatterns {
-		re := regexp.MustCompile(`(?i)` + pattern.regex)
-		matches := re.FindAllStringIndex(content, -1)
+	for patternName, cp := range cm.phiPatterns {
+		matches := cp.re.FindAllStringIndex(content, -1)
 
 		for _, match := range matches {
 			detection := Detection{
@@ -229,14 +142,14 @@ func (cm *ComplianceManager) detectPHI(result *ComplianceResult) *ComplianceResu
 				Pattern:     patternName,
 				Replacement: "PHI_REDACTED",
 				Position:    match[0],
-				Severity:    pattern.severity,
+				Severity:    cp.severity,
 			}
 			result.PHIDetections = append(result.PHIDetections, detection)
 
 			violation := Violation{
 				Type:        "phi",
 				Regulation:  "HIPAA",
-				Severity:    pattern.severity,
+				Severity:    cp.severity,
 				Description: "Protected Health Information detected: " + patternName,
 				Pattern:     patternName,
 				Position:    match[0],
@@ -244,8 +157,7 @@ func (cm *ComplianceManager) detectPHI(result *ComplianceResult) *ComplianceResu
 			result.Violations = append(result.Violations, violation)
 		}
 
-		// Redact PHI if configured
-		content = re.ReplaceAllString(content, "PHI_REDACTED")
+		content = cp.re.ReplaceAllString(content, "PHI_REDACTED")
 	}
 
 	result.Sanitized = content
@@ -256,52 +168,8 @@ func (cm *ComplianceManager) detectPHI(result *ComplianceResult) *ComplianceResu
 func (cm *ComplianceManager) detectPCI(result *ComplianceResult) *ComplianceResult {
 	content := result.Sanitized
 
-	// PCI patterns for PCI DSS
-	pciPatterns := map[string]struct {
-		regex    string
-		severity string
-	}{
-		"visa": {
-			regex:    `\b4[0-9]{3}(?:[-\s]?[0-9]{4}){3}\b`,
-			severity: "critical",
-		},
-		"mastercard": {
-			regex:    `\b5[1-5][0-9]{2}(?:[-\s]?[0-9]{4}){3}\b`,
-			severity: "critical",
-		},
-		"amex": {
-			regex:    `\b3[47][0-9]{2}[-\s]?[0-9]{6}[-\s]?[0-9]{5}\b`,
-			severity: "critical",
-		},
-		"discover": {
-			regex:    `\b6(?:011|5[0-9]{2})[-\s]?(?:[0-9]{4}[-\s]?){2}[0-9]{4}\b`,
-			severity: "critical",
-		},
-		"pan_masked": {
-			regex:    `[*Xx]{4}[-\s][*Xx]{4}[-\s][*Xx]{4}[-\s][0-9]{4}`,
-			severity: "critical",
-		},
-		"cvv": {
-			regex:    `\b(?:CVV|CVC|CSC|CID)[\s:]*([0-9]{3,4})\b`,
-			severity: "critical",
-		},
-		"exp_date": {
-			regex:    `\b(?:exp|expir)[\w\s]*:?\s*(\d{1,2}[/-]\d{2,4})\b`,
-			severity: "high",
-		},
-		"cardholder": {
-			regex:    `\b(?:cardholder|card holder)[\s:]+([A-Z\s]{5,30})\b`,
-			severity: "medium",
-		},
-		"track_data": {
-			regex:    `%[A-Z]?\d{13,19}\^[A-Z\s\/]{2,26}\^\d{4}`,
-			severity: "critical",
-		},
-	}
-
-	for patternName, pattern := range pciPatterns {
-		re := regexp.MustCompile(`(?i)` + pattern.regex)
-		matches := re.FindAllStringIndex(content, -1)
+	for patternName, cp := range cm.pciPatterns {
+		matches := cp.re.FindAllStringIndex(content, -1)
 
 		for _, match := range matches {
 			detection := Detection{
@@ -309,14 +177,14 @@ func (cm *ComplianceManager) detectPCI(result *ComplianceResult) *ComplianceResu
 				Pattern:     patternName,
 				Replacement: "CARD_DATA_REDACTED",
 				Position:    match[0],
-				Severity:    pattern.severity,
+				Severity:    cp.severity,
 			}
 			result.PCIDetections = append(result.PCIDetections, detection)
 
 			violation := Violation{
 				Type:        "pci",
 				Regulation:  "PCI DSS",
-				Severity:    pattern.severity,
+				Severity:    cp.severity,
 				Description: "Payment card data detected: " + patternName,
 				Pattern:     patternName,
 				Position:    match[0],
@@ -324,14 +192,12 @@ func (cm *ComplianceManager) detectPCI(result *ComplianceResult) *ComplianceResu
 			result.Violations = append(result.Violations, violation)
 		}
 
-		// Redact or tokenize card data if configured
 		if cm.config.PCI.TokenizeCards {
-			// Use function-based replacement to pass matched text
-			content = re.ReplaceAllStringFunc(content, func(match string) string {
+			content = cp.re.ReplaceAllStringFunc(content, func(match string) string {
 				return cm.tokenizeCardData(match)
 			})
 		} else {
-			content = re.ReplaceAllString(content, "CARD_DATA_REDACTED")
+			content = cp.re.ReplaceAllString(content, "CARD_DATA_REDACTED")
 		}
 	}
 
@@ -341,8 +207,7 @@ func (cm *ComplianceManager) detectPCI(result *ComplianceResult) *ComplianceResu
 
 // isValidCreditCard validates credit card number using Luhn algorithm
 func (cm *ComplianceManager) isValidCreditCard(cardNumber string) bool {
-	// Remove spaces and non-digit characters
-	cardNumber = regexp.MustCompile(`\D`).ReplaceAllString(cardNumber, "")
+	cardNumber = cm.digitRe.ReplaceAllString(cardNumber, "")
 
 	if len(cardNumber) < 13 || len(cardNumber) > 19 {
 		return false
@@ -351,7 +216,6 @@ func (cm *ComplianceManager) isValidCreditCard(cardNumber string) bool {
 	sum := 0
 	alternate := false
 
-	// Luhn algorithm
 	for i := len(cardNumber) - 1; i >= 0; i-- {
 		digit := int(cardNumber[i] - '0')
 		if alternate {
@@ -369,8 +233,7 @@ func (cm *ComplianceManager) isValidCreditCard(cardNumber string) bool {
 
 // tokenizeCardData creates a format-preserving token for card data
 func (cm *ComplianceManager) tokenizeCardData(cardNumber string) string {
-	// Extract last 4 digits
-	digits := regexp.MustCompile(`\d`).FindAllString(cardNumber, -1)
+	digits := cm.digitRe.FindAllString(cardNumber, -1)
 	if len(digits) < 4 {
 		return "XXXX-XXXX-XXXX-XXXX"
 	}
@@ -428,8 +291,124 @@ func (cm *ComplianceManager) logComplianceEvent(result *ComplianceResult) {
 	cm.logger.LogSecurityEvent(event)
 }
 
-// initializePatterns precompiles regex patterns for better performance
+// initializePatterns precompiles all regex patterns at construction time
 func (cm *ComplianceManager) initializePatterns() {
-	// Pre-compile patterns would go here for production optimization
-	// Omitted for brevity but important for performance
+	cm.digitRe = regexp.MustCompile(`\D`)
+
+	cm.piiPatterns = map[string]compiledPattern{
+		"ssn": {
+			re:       regexp.MustCompile(`\b(?:\d{3}[-\s]\d{2}[-\s]\d{4}|\d{9})\b`),
+			severity: "high",
+		},
+		"email": {
+			re:       regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b`),
+			severity: "medium",
+		},
+		"phone": {
+			re:       regexp.MustCompile(`\b(?:\+?1[-.\s]?)?\(?([0-9]{3})\)?[-.\s]?([0-9]{3})[-.\s]?([0-9]{4})\b`),
+			severity: "medium",
+		},
+		"phone_intl": {
+			re:       regexp.MustCompile(`\+\d{1,3}[\s.-](?:\d[\s.-]?){5,14}\d`),
+			severity: "medium",
+		},
+		"ip_address": {
+			re:       regexp.MustCompile(`\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b`),
+			severity: "low",
+		},
+		"ipv6_address": {
+			re:       regexp.MustCompile(`\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b`),
+			severity: "low",
+		},
+		"address": {
+			re:       regexp.MustCompile(`\b\d+\s+[A-Za-z0-9\s,.-]+(?:Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Lane|Ln|Boulevard|Blvd|Way)\b`),
+			severity: "medium",
+		},
+		"passport": {
+			re:       regexp.MustCompile(`\b(?:[A-Z]{1,2}[0-9]{6,9}|[0-9]{9}[A-Z]{2})\b`),
+			severity: "high",
+		},
+		"drivers_license": {
+			re:       regexp.MustCompile(`\b[A-Z]{1,2}[0-9]{6,8}\b`),
+			severity: "high",
+		},
+	}
+
+	cm.phiPatterns = map[string]compiledPattern{
+		"mrn": {
+			re:       regexp.MustCompile(`(?i)\b(?:MRN|Medical Record|Patient ID)[\s:]+([A-Z0-9]{6,12})\b`),
+			severity: "critical",
+		},
+		"health_plan": {
+			re:       regexp.MustCompile(`(?i)\b(?:Health Plan|Insurance|Policy)[\s#:]+([A-Z0-9]{8,15})\b`),
+			severity: "high",
+		},
+		"diagnosis_code": {
+			re:       regexp.MustCompile(`(?i)\b[A-Z]\d{2}(?:\.\d{1,4})?\b`),
+			severity: "high",
+		},
+		"medicare_id": {
+			re:       regexp.MustCompile(`(?i)\b\d[A-Z0-9]{3}-[A-Z0-9]{2}\d-[A-Z0-9]{2}\d{2}\b`),
+			severity: "critical",
+		},
+		"genetic_info": {
+			re:       regexp.MustCompile(`(?i)\b(?:BRCA[12]|TP53|KRAS|EGFR|ALK|BRAF|HER2|MLH1|MSH2)\b.*?(?:mutation|variant|deletion|insertion|c\.\d)`),
+			severity: "critical",
+		},
+		"health_condition_phi": {
+			re:       regexp.MustCompile(`(?i)\b(?:patient|diagnosed|diagnosis)\b.{0,50}\b(?:cancer|tumor|diabetes|hypertension|HIV|AIDS|hepatitis|dementia|schizophrenia|chemotherapy|radiation therapy)\b`),
+			severity: "high",
+		},
+		"dob_phi": {
+			re:       regexp.MustCompile(`(?i)\b(?:DOB|Date of Birth)[\s:]+(\d{1,2}[/-]\d{1,2}[/-]\d{4})\b`),
+			severity: "high",
+		},
+		"biometric": {
+			re:       regexp.MustCompile(`(?i)\b(?:fingerprint|retina|DNA|biometric)[\s:]+([A-Z0-9]+)\b`),
+			severity: "critical",
+		},
+		"device_identifier": {
+			re:       regexp.MustCompile(`(?i)\b(?:device|implant|serial)(?:\s+\w+)?[\s#:]+([A-Z0-9]{8,20})\b`),
+			severity: "medium",
+		},
+	}
+
+	cm.pciPatterns = map[string]compiledPattern{
+		"visa": {
+			re:       regexp.MustCompile(`(?i)\b4[0-9]{3}(?:[-\s]?[0-9]{4}){3}\b`),
+			severity: "critical",
+		},
+		"mastercard": {
+			re:       regexp.MustCompile(`(?i)\b5[1-5][0-9]{2}(?:[-\s]?[0-9]{4}){3}\b`),
+			severity: "critical",
+		},
+		"amex": {
+			re:       regexp.MustCompile(`(?i)\b3[47][0-9]{2}[-\s]?[0-9]{6}[-\s]?[0-9]{5}\b`),
+			severity: "critical",
+		},
+		"discover": {
+			re:       regexp.MustCompile(`(?i)\b6(?:011|5[0-9]{2})[-\s]?(?:[0-9]{4}[-\s]?){2}[0-9]{4}\b`),
+			severity: "critical",
+		},
+		"pan_masked": {
+			re:       regexp.MustCompile(`(?i)[*Xx]{4}[-\s][*Xx]{4}[-\s][*Xx]{4}[-\s][0-9]{4}`),
+			severity: "critical",
+		},
+		"cvv": {
+			re:       regexp.MustCompile(`(?i)\b(?:CVV|CVC|CSC|CID)[\s:]*([0-9]{3,4})\b`),
+			severity: "critical",
+		},
+		"exp_date": {
+			re:       regexp.MustCompile(`(?i)\b(?:exp|expir)[\w\s]*:?\s*(\d{1,2}[/-]\d{2,4})\b`),
+			severity: "high",
+		},
+		"cardholder": {
+			re:       regexp.MustCompile(`(?i)\b(?:cardholder|card holder)[\s:]+([A-Z\s]{5,30})\b`),
+			severity: "medium",
+		},
+		"track_data": {
+			re:       regexp.MustCompile(`(?i)%[A-Z]?\d{13,19}\^[A-Z\s\/]{2,26}\^\d{4}`),
+			severity: "critical",
+		},
+	}
 }
