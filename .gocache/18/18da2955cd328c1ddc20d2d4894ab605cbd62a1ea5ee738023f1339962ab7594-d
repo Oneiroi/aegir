@@ -1,0 +1,8 @@
+=== RUN   TestPCIDSSCompliancePayloads
+=== RUN   TestPCIDSSCompliancePayloads/visa_standard
+{"client_ip":"","detail_pci_detections":"1","detail_phi_detections":"0","detail_pii_detections":"0","detail_risk_level":"critical","event_type":"compliance_violation","hmac_signature":"a47ebeff6707c3720fd6e6e3b4d9682e0bb5a7ff96a1393ed4ddca8d793b308c","level":"info","log_timestamp":"2026-05-18T11:47:52.322231Z","msg":"SECURITY: Compliance data detected in content","sequence_id":1,"severity":"critical","time":"2026-05-18T12:47:52.322258+01:00","timestamp":"2026-05-18T12:47:52.322123+01:00","user_id":""}
+    compliance_payloads_test.go:479: ✅ PCI DSS: Successfully detected and redacted cardholder data in Standard Visa card format with dashes
+--- PASS: TestPCIDSSCompliancePayloads (0.00s)
+    --- PASS: TestPCIDSSCompliancePayloads/visa_standard (0.00s)
+PASS
+ok  	github.com/aegishjalmur/aegir/internal/sanitizer	0.398s

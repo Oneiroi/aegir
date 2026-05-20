@@ -1,0 +1,6 @@
+./compliance.go
+./ioc_patterns.go
+./manager.go
+./compliance_payloads_test.go
+./known_payloads_test.go
+./sanitizer_test.go
