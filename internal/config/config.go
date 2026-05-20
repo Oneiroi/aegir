@@ -121,6 +121,7 @@ type RateLimit struct {
 	RequestsPerMin  int  `json:"requests_per_min" mapstructure:"requests_per_min"`
 	BurstSize       int  `json:"burst_size"       mapstructure:"burst_size"`
 	CleanupInterval int  `json:"cleanup_interval" mapstructure:"cleanup_interval"`
+	MaxTrackedIPs   int  `json:"max_tracked_ips"  mapstructure:"max_tracked_ips"`
 }
 
 // Sanitization configuration
@@ -641,6 +642,7 @@ func LoadLegacy() (*Config, error) {
 				RequestsPerMin:  getEnvAsInt("RATE_LIMIT_RPM", 100),
 				BurstSize:       getEnvAsInt("RATE_LIMIT_BURST", 20),
 				CleanupInterval: getEnvAsInt("RATE_LIMIT_CLEANUP", 300),
+				MaxTrackedIPs:   getEnvAsInt("RATE_LIMIT_MAX_TRACKED_IPS", 100000),
 			},
 			Sanitization: Sanitization{
 				Enabled:          getEnvAsBool("SANITIZATION_ENABLED", true),

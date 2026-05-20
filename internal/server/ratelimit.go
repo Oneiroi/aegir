@@ -76,6 +76,26 @@ func (rl *RateLimiter) GetLimiter(clientIP string) *rate.Limiter {
 	// Get existing limiter or create new one
 	client, exists := rl.clients[clientIP]
 	if !exists {
+		// Enforce MaxTrackedIPs cap to prevent unbounded memory growth from
+		// attackers rotating IPs. When the cap is hit, evict the oldest-last-seen
+		// entry. Linear scan is acceptable because this path only triggers when
+		// the cap is reached, not on every request.
+		if rl.config.MaxTrackedIPs > 0 && len(rl.clients) >= rl.config.MaxTrackedIPs {
+			var oldestKey string
+			var oldestSeen time.Time
+			first := true
+			for k, v := range rl.clients {
+				if first || v.lastSeen.Before(oldestSeen) {
+					oldestKey = k
+					oldestSeen = v.lastSeen
+					first = false
+				}
+			}
+			if !first {
+				delete(rl.clients, oldestKey)
+			}
+		}
+
 		// Create new limiter: requests per minute converted to requests per second
 		rps := rate.Limit(float64(rl.config.RequestsPerMin) / 60.0)
 		limiter := rate.NewLimiter(rps, rl.config.BurstSize)
@@ -119,8 +139,19 @@ func (rl *RateLimiter) Middleware() gin.HandlerFunc {
 	return gin.HandlerFunc(func(c *gin.Context) {
 		clientIP := rl.getClientIP(c)
 
-		if !rl.IsAllowed(clientIP) {
-			rl.logger.Warn("Rate limit exceeded", "client_ip", clientIP)
+		// Key rate limiting to authenticated identity when available, so that
+		// a single compromised account cannot multiply its rate budget by
+		// rotating source IPs. Fall back to client IP for unauthenticated
+		// requests.
+		clientKey := clientIP
+		if userID, exists := c.Get("user_id"); exists {
+			if uid, ok := userID.(string); ok && uid != "" {
+				clientKey = uid
+			}
+		}
+
+		if !rl.IsAllowed(clientKey) {
+			rl.logger.Warn("Rate limit exceeded", "client_ip", clientIP, "client_key", clientKey)
 			c.JSON(429, gin.H{
 				"error":   "Rate limit exceeded",
 				"message": "Too many requests, please try again later",
