@@ -61,7 +61,18 @@ func createTestMCPProxy(t testing.TB) *MCPProxy {
 	sessionAnalyzer := session.NewConversationalThreatAnalyzer(sessionCfg, logger)
 	t.Cleanup(sessionAnalyzer.Stop)
 
-	return NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, sessionAnalyzer, nil)
+	// Create default config for tests
+	defaultCfg := &config.Config{
+		Security: config.Security{
+			AnomalyDetection: config.AnomalyDetection{
+				Enabled:        false,
+				BlockThreshold: 0.95,
+				LogThreshold:   0.60,
+			},
+		},
+	}
+
+	return NewMCPProxy(defaultCfg, logger, sanitizerMgr, complianceMgr, upstreamMgr, sessionAnalyzer, nil)
 }
 
 func TestMCPInitialize(t *testing.T) {
@@ -492,8 +503,8 @@ func TestTransportEndpointsCoexistence(t *testing.T) {
 
 	// Test that all endpoints are registered and don't conflict
 	endpoints := []struct {
-		method string
-		path   string
+		method   string
+		path     string
 		expectOK bool
 	}{
 		{"POST", "/mcp/", true},
@@ -589,7 +600,18 @@ func TestTwoTierThreatResponseRealHTTP(t *testing.T) {
 		sanitizerMgr := sanitizer.New(config.Security{}, logger)
 		complianceMgr := sanitizer.NewComplianceManager(config.Compliance{}, logger)
 		upstreamMgr := upstream.NewManager(&config.Upstream{}, logger)
-		proxy := NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, mock, nil)
+
+		// Create default config for tests
+		defaultCfg := &config.Config{
+			Security: config.Security{
+				AnomalyDetection: config.AnomalyDetection{
+					Enabled:        false,
+					BlockThreshold: 0.95,
+					LogThreshold:   0.60,
+				},
+			},
+		}
+		proxy := NewMCPProxy(defaultCfg, logger, sanitizerMgr, complianceMgr, upstreamMgr, mock, nil)
 		r.POST("/mcp", proxy.HandleMCPRequest)
 		return r
 	}
@@ -696,4 +718,74 @@ func BenchmarkTransportPerformance(b *testing.B) {
 			router.ServeHTTP(w, req)
 		}
 	})
+}
+
+// TestToolsCallSSRFBlocked verifies that a tool call carrying a URL argument
+// pointing at the cloud-metadata link-local address is rejected by the SSRF
+// guard in handleToolsCall (P1-5).
+func TestToolsCallSSRFBlocked(t *testing.T) {
+	proxy := createTestMCPProxy(t)
+
+	ssrfTargets := []string{
+		"http://169.254.169.254/latest/meta-data/",
+		"http://127.0.0.1:8080/admin",
+		"http://10.0.0.1/internal",
+		"file:///etc/passwd",
+	}
+
+	for _, target := range ssrfTargets {
+		t.Run(target, func(t *testing.T) {
+			req := MCPRequest{
+				Method: "tools/call",
+				Params: map[string]interface{}{
+					"name": "security_scan",
+					"arguments": map[string]interface{}{
+						"url":     target,
+						"content": "benign",
+					},
+				},
+				ID: "ssrf-test",
+			}
+
+			resp := proxy.processMCPMethod(context.Background(), &req)
+			if resp == nil {
+				t.Fatalf("expected response, got nil")
+			}
+			if resp.Error == nil {
+				t.Fatalf("expected SSRF block error for %s, got success: %+v", target, resp.Result)
+			}
+			if resp.Error.Code != -32000 {
+				t.Errorf("expected error code -32000, got %d", resp.Error.Code)
+			}
+			if !strings.Contains(resp.Error.Message, "blocked") {
+				t.Errorf("expected error message to mention 'blocked', got %q", resp.Error.Message)
+			}
+		})
+	}
+}
+
+// TestToolsCallNonURLArgsAllowed makes sure the SSRF guard does not regress
+// normal tool calls whose arguments simply happen to be strings.
+func TestToolsCallNonURLArgsAllowed(t *testing.T) {
+	proxy := createTestMCPProxy(t)
+
+	req := MCPRequest{
+		Method: "tools/call",
+		Params: map[string]interface{}{
+			"name": "security_scan",
+			"arguments": map[string]interface{}{
+				"content": "hello world",
+				"note":    "just a string, not a url",
+			},
+		},
+		ID: "ssrf-pass",
+	}
+
+	resp := proxy.processMCPMethod(context.Background(), &req)
+	if resp == nil {
+		t.Fatalf("expected response, got nil")
+	}
+	if resp.Error != nil {
+		t.Fatalf("expected success for non-URL args, got error: %+v", resp.Error)
+	}
 }

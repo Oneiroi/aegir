@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/aegishjalmur/aegir/internal/anomaly"
+	"github.com/aegishjalmur/aegir/internal/config"
 	"github.com/aegishjalmur/aegir/internal/dashboard"
 	"github.com/aegishjalmur/aegir/internal/logging"
 	"github.com/aegishjalmur/aegir/internal/sanitizer"
@@ -25,6 +27,7 @@ import (
 // MCPProxy handles proxying and securing MCP requests
 type MCPProxy struct {
 	logger            *logging.Logger
+	config            *config.Config
 	sanitizer         *sanitizer.Manager
 	complianceManager *sanitizer.ComplianceManager
 	upstreamManager   *upstream.Manager
@@ -37,7 +40,7 @@ type MCPProxy struct {
 
 // AnomalyStats holds aggregate anomaly scoring data for metrics.
 type AnomalyStats struct {
-	TotalScored uint64  `json:"total_scored"`
+	TotalScored  uint64  `json:"total_scored"`
 	AverageScore float64 `json:"average_score"`
 }
 
@@ -68,14 +71,15 @@ type MCPResponse struct {
 
 // MCPError represents an MCP error
 type MCPError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+	Code    int         `json:"code"`
+	Message string      `json:"message"`
 	Data    interface{} `json:"data,omitempty"`
 }
 
 // NewMCPProxy creates a new MCP proxy instance
-func NewMCPProxy(logger *logging.Logger, sanitizerMgr *sanitizer.Manager, complianceMgr *sanitizer.ComplianceManager, upstreamMgr *upstream.Manager, sessionAnalyzer session.ThreatAnalyzer, anomalyDet anomaly.Detector) *MCPProxy {
+func NewMCPProxy(cfg *config.Config, logger *logging.Logger, sanitizerMgr *sanitizer.Manager, complianceMgr *sanitizer.ComplianceManager, upstreamMgr *upstream.Manager, sessionAnalyzer session.ThreatAnalyzer, anomalyDet anomaly.Detector) *MCPProxy {
 	return &MCPProxy{
+		config:            cfg,
 		logger:            logger,
 		sanitizer:         sanitizerMgr,
 		complianceManager: complianceMgr,
@@ -189,7 +193,33 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 		anomalyScore := p.anomalyDetector.Score(req.Method + " " + string(paramsJSON))
 		p.anomalyCount.Add(1)
 		p.anomalyScoreSum.Add(uint64(anomalyScore * 1e6))
-		p.logger.Info("Anomaly score", "method", req.Method, "anomaly_score", fmt.Sprintf("%.3f", anomalyScore))
+
+		// Check if anomaly score exceeds block threshold
+		if p.config.Security.AnomalyDetection.Enabled && anomalyScore >= p.config.Security.AnomalyDetection.BlockThreshold {
+			p.logger.Warn("MCP request blocked by anomaly detection",
+				"method", req.Method,
+				"anomaly_score", fmt.Sprintf("%.3f", anomalyScore),
+				"block_threshold", fmt.Sprintf("%.3f", p.config.Security.AnomalyDetection.BlockThreshold))
+
+			c.JSON(http.StatusForbidden, MCPResponse{
+				Error: &MCPError{
+					Code:    -32000,
+					Message: "Request blocked by anomaly detection",
+					Data:    fmt.Sprintf("Anomaly score %.3f exceeds threshold %.3f", anomalyScore, p.config.Security.AnomalyDetection.BlockThreshold),
+				},
+				ID: req.ID,
+			})
+			return
+		}
+
+		// Log at warn level if score exceeds log threshold
+		if anomalyScore >= p.config.Security.AnomalyDetection.LogThreshold {
+			p.logger.Warn("High anomaly score (logging only)",
+				"method", req.Method,
+				"anomaly_score", fmt.Sprintf("%.3f", anomalyScore))
+		} else {
+			p.logger.Info("Anomaly score", "method", req.Method, "anomaly_score", fmt.Sprintf("%.3f", anomalyScore))
+		}
 	}
 
 	// Apply security sanitization
@@ -306,11 +336,28 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 	responseJSON, _ := json.Marshal(response.Result)
 	responseSanitized := p.sanitizer.SanitizeContent(string(responseJSON))
 
+	// Scan response for compliance violations (P1-3: Response compliance gap)
+	responseComplianceResult := p.complianceManager.ScanForCompliance(responseSanitized.Sanitized)
+
 	if responseSanitized.Sanitized != string(responseJSON) {
 		var sanitizedResult interface{}
 		if err := json.Unmarshal([]byte(responseSanitized.Sanitized), &sanitizedResult); err == nil {
 			response.Result = sanitizedResult
 		}
+	}
+
+	// Log compliance violations in response
+	if len(responseComplianceResult.Violations) > 0 {
+		p.logger.LogSecurityEvent(&logging.SecurityEvent{
+			Type:      "response_compliance_violation",
+			Severity:  responseComplianceResult.ComplianceRisk,
+			Message:   "Regulated data in model response",
+			Timestamp: time.Now(),
+			Details: map[string]string{
+				"violations": strconv.Itoa(len(responseComplianceResult.Violations)),
+				"risk_level": responseComplianceResult.ComplianceRisk,
+			},
+		})
 	}
 
 	c.JSON(http.StatusOK, response)
@@ -361,7 +408,7 @@ func (p *MCPProxy) handleInitialize(ctx context.Context, req *MCPRequest) *MCPRe
 		"protocolVersion": "2025-06-18",
 		"capabilities": map[string]interface{}{
 			"resources": map[string]interface{}{
-				"subscribe":    true,
+				"subscribe":   true,
 				"listChanged": true,
 			},
 			"tools": map[string]interface{}{
@@ -377,9 +424,9 @@ func (p *MCPProxy) handleInitialize(ctx context.Context, req *MCPRequest) *MCPRe
 			"security": map[string]interface{}{
 				"content_filtering":   true,
 				"compliance_scanning": true,
-				"rate_limiting":      true,
-				"threat_detection":   true,
-				"data_sanitization":  true,
+				"rate_limiting":       true,
+				"threat_detection":    true,
+				"data_sanitization":   true,
 			},
 		},
 		"serverInfo": map[string]interface{}{
@@ -415,9 +462,9 @@ func (p *MCPProxy) mergeInitializeCapabilities(upstreamResponse *MCPResponse, re
 	capabilities["security"] = map[string]interface{}{
 		"content_filtering":   true,
 		"compliance_scanning": true,
-		"rate_limiting":      true,
-		"threat_detection":   true,
-		"data_sanitization":  true,
+		"rate_limiting":       true,
+		"threat_detection":    true,
+		"data_sanitization":   true,
 	}
 
 	// Update server info to indicate firewall proxy
@@ -737,6 +784,28 @@ func (p *MCPProxy) handleToolsCall(ctx context.Context, req *MCPRequest) *MCPRes
 				Message: "Missing required parameter: name",
 			},
 			ID: req.ID,
+		}
+	}
+
+	// SSRF prevention: validate any URL-typed argument values before dispatch.
+	if arguments, ok := paramsMap["arguments"].(map[string]interface{}); ok {
+		for argName, argVal := range arguments {
+			strVal, ok := argVal.(string)
+			if !ok {
+				continue
+			}
+			if !looksLikeURL(strVal) {
+				continue
+			}
+			if err := p.validateResourceURI(strVal); err != nil {
+				return &MCPResponse{
+					Error: &MCPError{
+						Code:    -32000,
+						Message: fmt.Sprintf("Tool argument %q blocked: %v", argName, err),
+					},
+					ID: req.ID,
+				}
+			}
 		}
 	}
 
@@ -1313,6 +1382,14 @@ func (p *MCPProxy) HandleSSEEvents(c *gin.Context) {
 	}
 }
 
+// looksLikeURL returns true if the string is plausibly a URL the proxy
+// should validate against SSRF. Used to filter tool-call arguments.
+func looksLikeURL(s string) bool {
+	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://") ||
+		strings.HasPrefix(s, "ftp://") || strings.HasPrefix(s, "file://") ||
+		strings.Contains(s, "://")
+}
+
 // validateResourceURI validates resource URIs for security
 func (p *MCPProxy) validateResourceURI(uri string) error {
 	parsedURL, err := url.Parse(uri)
@@ -1328,13 +1405,22 @@ func (p *MCPProxy) validateResourceURI(uri string) error {
 		return fmt.Errorf("javascript: URIs are not allowed")
 	case "data":
 		return fmt.Errorf("data: URIs are not allowed")
+	case "gopher", "ftp":
+		return fmt.Errorf("%s:// URIs are not allowed", parsedURL.Scheme)
 	}
 
 	// Validate hostname if present
 	if parsedURL.Host != "" {
-		// Could add hostname whitelist/blacklist here
-		if parsedURL.Host == "localhost" || parsedURL.Host == "127.0.0.1" {
-			return fmt.Errorf("localhost URIs are not allowed")
+		hostname := parsedURL.Hostname()
+		lower := strings.ToLower(hostname)
+		if lower == "localhost" || strings.HasSuffix(lower, ".localhost") || lower == "metadata.google.internal" {
+			return fmt.Errorf("internal hostnames are not allowed")
+		}
+		if ip := net.ParseIP(hostname); ip != nil {
+			if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+				ip.IsPrivate() || ip.IsUnspecified() || ip.IsMulticast() {
+				return fmt.Errorf("IP %s is in a restricted range", ip.String())
+			}
 		}
 	}
 

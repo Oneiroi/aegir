@@ -52,7 +52,18 @@ func createTestMCPProxyForSSE() *MCPProxy {
 	// Create test session analyzer
 	sessionAnalyzer := session.NewConversationalThreatAnalyzer(session.AnalyzerConfig{}, logger)
 
-	return NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, sessionAnalyzer, nil)
+	// Create default config for tests
+	defaultCfg := &config.Config{
+		Security: config.Security{
+			AnomalyDetection: config.AnomalyDetection{
+				Enabled:         false,
+				BlockThreshold:  0.95,
+				LogThreshold:    0.60,
+			},
+		},
+	}
+
+	return NewMCPProxy(defaultCfg, logger, sanitizerMgr, complianceMgr, upstreamMgr, sessionAnalyzer, nil)
 }
 
 func TestSSEConnectionEstablishment(t *testing.T) {

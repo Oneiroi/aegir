@@ -100,7 +100,9 @@ type Logging struct {
 
 // AnomalyDetection configuration for heuristic content anomaly scoring
 type AnomalyDetection struct {
-	Enabled bool `json:"enabled" mapstructure:"enabled"`
+	Enabled         bool    `json:"enabled" mapstructure:"enabled"`
+	BlockThreshold  float64 `json:"block_threshold" mapstructure:"block_threshold"`  // Block if score > this (0.0-1.0)
+	LogThreshold    float64 `json:"log_threshold" mapstructure:"log_threshold"`      // Log only if score > this, < block_threshold
 }
 
 // Security configuration
@@ -496,6 +498,8 @@ func setDefaults(v *viper.Viper) {
 
 	// Upstream defaults
 	v.SetDefault("security.anomaly_detection.enabled", false)
+	v.SetDefault("security.anomaly_detection.block_threshold", 0.95)
+	v.SetDefault("security.anomaly_detection.log_threshold", 0.60)
 
 	v.SetDefault("upstream.services", []map[string]interface{}{
 		{

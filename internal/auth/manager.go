@@ -4,7 +4,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"math/big"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -109,12 +111,46 @@ func New(config config.Auth, logger *logging.Logger) (*Manager, error) {
 	return mgr, nil
 }
 
+// generateRandomPassword returns a cryptographically random password of the given length.
+func generateRandomPassword(length int) (string, error) {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%"
+	out := make([]byte, length)
+	max := big.NewInt(int64(len(charset)))
+	for i := 0; i < length; i++ {
+		n, err := rand.Int(rand.Reader, max)
+		if err != nil {
+			return "", err
+		}
+		out[i] = charset[n.Int64()]
+	}
+	return string(out), nil
+}
+
 // createDefaultUsers creates default users for initial setup
 func (m *Manager) createDefaultUsers() error {
 	adminID := uuid.New().String()
-	passwordHash, err := bcrypt.GenerateFromPassword([]byte("admin123"), bcrypt.DefaultCost)
+
+	adminPassword := os.Getenv("AEGIR_ADMIN_PASSWORD")
+	generated := false
+	if adminPassword == "" {
+		pw, err := generateRandomPassword(20)
+		if err != nil {
+			return fmt.Errorf("failed to generate admin password: %w", err)
+		}
+		adminPassword = pw
+		generated = true
+	}
+
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(adminPassword), bcrypt.DefaultCost)
 	if err != nil {
 		return err
+	}
+
+	if generated {
+		// Log the generated password ONCE so the operator can capture it.
+		// Use both the structured logger and stderr so it is visible in all deployments.
+		m.logger.Info("[AEGIR STARTUP] Admin password (save this): " + adminPassword)
+		fmt.Fprintf(os.Stderr, "[AEGIR STARTUP] Admin password (save this): %s\n", adminPassword)
 	}
 
 	admin := &User{

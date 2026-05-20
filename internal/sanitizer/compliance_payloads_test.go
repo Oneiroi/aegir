@@ -471,7 +471,8 @@ func TestPCIDSSCompliancePayloads(t *testing.T) {
 				// Check for redaction markers
 				if !strings.Contains(result.Sanitized, "CARD_REDACTED") &&
 				   !strings.Contains(result.Sanitized, "CVV_REDACTED") &&
-				   !strings.Contains(result.Sanitized, "REDACTED") {
+				   !strings.Contains(result.Sanitized, "REDACTED") &&
+					   !strings.Contains(result.Sanitized, "XXXX-XXXX") {
 					t.Errorf("Expected redaction marker in: %s", tc.description)
 				}
 

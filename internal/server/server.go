@@ -95,7 +95,7 @@ func New(cfg *config.Config) (*MCPFirewall, error) {
 	}
 
 	// Initialize MCP proxy
-	mcpProxy := NewMCPProxy(logger, sanitizerManager, complianceManager, upstreamManager, sessionAnalyzer, anomalyDetector)
+	mcpProxy := NewMCPProxy(cfg, logger, sanitizerManager, complianceManager, upstreamManager, sessionAnalyzer, anomalyDetector)
 
 	// Initialize dashboard statistics collector
 	dashboardStats := dashboard.NewStatsCollector(logger)

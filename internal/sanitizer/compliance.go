@@ -65,9 +65,10 @@ func (cm *ComplianceManager) ScanForCompliance(content string) *ComplianceResult
 		Violations:    []Violation{},
 	}
 
-	// GDPR/CCPA PII Detection
-	if cm.config.GDPR.Enabled && cm.config.GDPR.PIIDetection {
-		result = cm.detectPII(result)
+	// PCI DSS Card Data Detection — must run before PII so card numbers
+	// aren't partially consumed by phone/SSN patterns first
+	if cm.config.PCI.Enabled && cm.config.PCI.CardDetection {
+		result = cm.detectPCI(result)
 	}
 
 	// HIPAA PHI Detection
@@ -75,9 +76,9 @@ func (cm *ComplianceManager) ScanForCompliance(content string) *ComplianceResult
 		result = cm.detectPHI(result)
 	}
 
-	// PCI DSS Card Data Detection
-	if cm.config.PCI.Enabled && cm.config.PCI.CardDetection {
-		result = cm.detectPCI(result)
+	// GDPR/CCPA PII Detection
+	if cm.config.GDPR.Enabled && cm.config.GDPR.PIIDetection {
+		result = cm.detectPII(result)
 	}
 
 	// Calculate compliance risk
@@ -101,7 +102,7 @@ func (cm *ComplianceManager) detectPII(result *ComplianceResult) *ComplianceResu
 		severity string
 	}{
 		"ssn": {
-			regex:    `\b(?:\d{3}-\d{2}-\d{4}|\d{9})\b`,
+			regex:    `\b(?:\d{3}[-\s]\d{2}[-\s]\d{4}|\d{9})\b`,
 			severity: "high",
 		},
 		"email": {
@@ -112,8 +113,16 @@ func (cm *ComplianceManager) detectPII(result *ComplianceResult) *ComplianceResu
 			regex:    `\b(?:\+?1[-.\s]?)?\(?([0-9]{3})\)?[-.\s]?([0-9]{3})[-.\s]?([0-9]{4})\b`,
 			severity: "medium",
 		},
+		"phone_intl": {
+			regex:    `\+\d{1,3}[\s.-](?:\d[\s.-]?){5,14}\d`,
+			severity: "medium",
+		},
 		"ip_address": {
 			regex:    `\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b`,
+			severity: "low",
+		},
+		"ipv6_address": {
+			regex:    `\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b`,
 			severity: "low",
 		},
 		"address": {
@@ -121,7 +130,7 @@ func (cm *ComplianceManager) detectPII(result *ComplianceResult) *ComplianceResu
 			severity: "medium",
 		},
 		"passport": {
-			regex:    `\b[A-Z]{1,2}[0-9]{6,9}\b`,
+			regex:    `\b(?:[A-Z]{1,2}[0-9]{6,9}|[0-9]{9}[A-Z]{2})\b`,
 			severity: "high",
 		},
 		"drivers_license": {
@@ -181,7 +190,19 @@ func (cm *ComplianceManager) detectPHI(result *ComplianceResult) *ComplianceResu
 			severity: "high",
 		},
 		"diagnosis_code": {
-			regex:    `\b[A-Z]\d{2}\.\d{1,3}\b`, // ICD-10 format
+			regex:    `\b[A-Z]\d{2}(?:\.\d{1,4})?\b`, // ICD-10 format (decimal optional)
+			severity: "high",
+		},
+		"medicare_id": {
+			regex:    `\b\d[A-Z0-9]{3}-[A-Z0-9]{2}\d-[A-Z0-9]{2}\d{2}\b`, // Medicare Beneficiary ID
+			severity: "critical",
+		},
+		"genetic_info": {
+			regex:    `\b(?:BRCA[12]|TP53|KRAS|EGFR|ALK|BRAF|HER2|MLH1|MSH2)\b.*?(?:mutation|variant|deletion|insertion|c\.\d)`,
+			severity: "critical",
+		},
+		"health_condition_phi": {
+			regex:    `(?i)\b(?:patient|diagnosed|diagnosis)\b.{0,50}\b(?:cancer|tumor|diabetes|hypertension|HIV|AIDS|hepatitis|dementia|schizophrenia|chemotherapy|radiation therapy)\b`,
 			severity: "high",
 		},
 		"dob_phi": {
@@ -193,7 +214,7 @@ func (cm *ComplianceManager) detectPHI(result *ComplianceResult) *ComplianceResu
 			severity: "critical",
 		},
 		"device_identifier": {
-			regex:    `\b(?:device|implant|serial)[\s#:]+([A-Z0-9]{8,20})\b`,
+			regex:    `\b(?:device|implant|serial)(?:\s+\w+)?[\s#:]+([A-Z0-9]{8,20})\b`,
 			severity: "medium",
 		},
 	}
@@ -241,19 +262,23 @@ func (cm *ComplianceManager) detectPCI(result *ComplianceResult) *ComplianceResu
 		severity string
 	}{
 		"visa": {
-			regex:    `\b4[0-9]{12}(?:[0-9]{3})?\b`,
+			regex:    `\b4[0-9]{3}(?:[-\s]?[0-9]{4}){3}\b`,
 			severity: "critical",
 		},
 		"mastercard": {
-			regex:    `\b5[1-5][0-9]{14}\b`,
+			regex:    `\b5[1-5][0-9]{2}(?:[-\s]?[0-9]{4}){3}\b`,
 			severity: "critical",
 		},
 		"amex": {
-			regex:    `\b3[47][0-9]{13}\b`,
+			regex:    `\b3[47][0-9]{2}[-\s]?[0-9]{6}[-\s]?[0-9]{5}\b`,
 			severity: "critical",
 		},
 		"discover": {
-			regex:    `\b6(?:011|5[0-9]{2})[0-9]{12}\b`,
+			regex:    `\b6(?:011|5[0-9]{2})[-\s]?(?:[0-9]{4}[-\s]?){2}[0-9]{4}\b`,
+			severity: "critical",
+		},
+		"pan_masked": {
+			regex:    `[*Xx]{4}[-\s][*Xx]{4}[-\s][*Xx]{4}[-\s][0-9]{4}`,
 			severity: "critical",
 		},
 		"cvv": {
@@ -279,15 +304,6 @@ func (cm *ComplianceManager) detectPCI(result *ComplianceResult) *ComplianceResu
 		matches := re.FindAllStringIndex(content, -1)
 
 		for _, match := range matches {
-			// Additional validation for credit card numbers using Luhn algorithm
-			if strings.HasPrefix(patternName, "visa") || strings.HasPrefix(patternName, "master") ||
-			   strings.HasPrefix(patternName, "amex") || strings.HasPrefix(patternName, "discover") {
-				matchText := content[match[0]:match[1]]
-				if !cm.isValidCreditCard(matchText) {
-					continue
-				}
-			}
-
 			detection := Detection{
 				Type:        "pci_" + patternName,
 				Pattern:     patternName,

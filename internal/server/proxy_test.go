@@ -59,7 +59,18 @@ func setupMCPProxyWithSessionAnalyzer(sessionRisk string) *MCPProxy {
 		}
 	}
 
-	return NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, sessionAnalyzer, nil)
+	// Create default config for tests
+	defaultCfg := &config.Config{
+		Security: config.Security{
+			AnomalyDetection: config.AnomalyDetection{
+				Enabled:         false,
+				BlockThreshold:  0.95,
+				LogThreshold:    0.60,
+			},
+		},
+	}
+
+	return NewMCPProxy(defaultCfg, logger, sanitizerMgr, complianceMgr, upstreamMgr, sessionAnalyzer, nil)
 }
 
 func TestTwoTierThreatResponse(t *testing.T) {
@@ -148,7 +159,19 @@ func newMockProxy(mock *MockSessionAnalyzer) *MCPProxy {
 	sanitizerMgr := sanitizer.New(config.Security{}, logger)
 	complianceMgr := sanitizer.NewComplianceManager(config.Compliance{}, logger)
 	upstreamMgr := upstream.NewManager(&config.Upstream{}, logger)
-	return NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, mock, nil)
+
+	// Create default config for tests
+	defaultCfg := &config.Config{
+		Security: config.Security{
+			AnomalyDetection: config.AnomalyDetection{
+				Enabled:         false,
+				BlockThreshold:  0.95,
+				LogThreshold:    0.60,
+			},
+		},
+	}
+
+	return NewMCPProxy(defaultCfg, logger, sanitizerMgr, complianceMgr, upstreamMgr, mock, nil)
 }
 
 func makeTestContext(method string, body []byte) (*httptest.ResponseRecorder, *gin.Context) {
@@ -266,7 +289,18 @@ func TestTwoTierThreatResponseEdgeCases(t *testing.T) {
 		complianceMgr := sanitizer.NewComplianceManager(config.Compliance{}, logger)
 		upstreamMgr := upstream.NewManager(&config.Upstream{}, logger)
 
-		proxy := NewMCPProxy(logger, sanitizerMgr, complianceMgr, upstreamMgr, nil, nil)
+		// Create default config for tests
+		defaultCfg := &config.Config{
+			Security: config.Security{
+				AnomalyDetection: config.AnomalyDetection{
+					Enabled:         false,
+					BlockThreshold:  0.95,
+					LogThreshold:    0.60,
+				},
+			},
+		}
+
+		proxy := NewMCPProxy(defaultCfg, logger, sanitizerMgr, complianceMgr, upstreamMgr, nil, nil)
 		body, _ := json.Marshal(MCPRequest{Method: "tools/call", ID: 11})
 		_, c := makeTestContext("POST", body)
 		proxy.HandleMCPRequest(c)
