@@ -6,6 +6,7 @@ cmd/server/test-aegir-env
 cmd/server/test-aegir-shutdown
 certs/cert.pem
 certs/key.pem
+reference/*
 
 # ── GSD baseline (auto-generated) ──
 .gsd

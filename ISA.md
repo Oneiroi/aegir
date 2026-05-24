@@ -5,10 +5,10 @@ project: Aegir
 effort: E4
 effort_source: classifier
 phase: execute
-progress: 0/134
+progress: 0/153
 mode: interactive
 started: 2026-05-13T21:00:00Z
-updated: 2026-05-23T00:00:00Z
+updated: 2026-05-24T00:00:00Z
 ---
 
 ## Problem
@@ -186,6 +186,60 @@ Close the three confirmed open bugs (BUG-2 DNS rebinding, BUG-3 rate limiter mem
 - [ ] ISC-91: Non-judge request path p99 latency <10ms under 1k req/s — probe: load test confirms
 - [ ] ISC-92: Pattern-based detection sustains 10k req/s on single node — probe: `hey` or `k6` load test
 
+### Tool Metadata Security — [REF-2026-05-24]
+
+- [ ] ISC-105: [REF-2026-05-24] `detectPromptInjection()` applied to tool `description` fields in `tools/list` responses before forwarding to client — probe: `tools/list` response where a tool description contains `ignore all previous instructions` triggers detection event and description is redacted or blocked
+- [ ] ISC-106: [REF-2026-05-24] Heuristic cross-tool shadowing detection: `tools/list` response corpus scanned for cross-tool behavioural directives (e.g., BCC injection strings, "when calling X tool, always..." patterns referencing other tools) — probe: `tools/list` with shadowing string triggers `tool_shadowing_detected` log event
+- [ ] ISC-107: [REF-2026-05-24] Tool description drift detection: Aegir hashes each upstream tool description (SHA-256) on first receipt; subsequent `tools/list` responses compared against stored hashes; change without version bump logs `tool_description_changed` event with old/new hash — probe: modify upstream tool description; next `tools/list` response produces `tool_description_changed` log entry
+- [ ] ISC-108: [REF-2026-05-24] Tool name collision detection: when Aegir proxies multiple upstream MCP servers, duplicate tool names across namespaces logged as `tool_name_collision` event; configurable policy: warn (default) or block — probe: two upstreams advertising identical tool name produces `tool_name_collision` log entry
+- [ ] ISC-109: [REF-2026-05-24] `detectSecrets()` applied to tool description fields in `tools/list` responses — probe: AWS key pattern (`AKIA[A-Z0-9]{16}`) in a tool description triggers secret detection event
+
+### Protocol Integrity — [REF-2026-05-24]
+
+- [ ] ISC-110: [REF-2026-05-24] MCP JSON-RPC schema validation on all forwarded messages (requests and responses); messages with unexpected structure or unknown top-level fields rejected with well-formed MCP error, not silently forwarded — probe: send `tools/list` response with injected unknown top-level field; Aegir rejects with MCP error code, does not forward to client
+
+### Upstream Trust — [REF-2026-05-24]
+
+- [ ] ISC-111: [REF-2026-05-24] Upstream connection supports mTLS with configurable certificate pinning: `aegir.yaml` accepts `upstream.tls.cert_pin` (SHA-256 fingerprint); Aegir verifies upstream certificate fingerprint on connect; mismatch blocks connection — probe: connect to upstream with wrong certificate fingerprint; connection blocked with `upstream_cert_mismatch` log event
+
+### Behavioural Telemetry — [REF-2026-05-24]
+
+- [ ] ISC-112: [REF-2026-05-24] Tool-call sequence anomaly detection: Aegir tracks ordered tool-call sequences per session; configurable high-risk sequence patterns (e.g., `list_credentials` → `send_*` within sliding window) trigger `sequence_anomaly` detection event — probe: `go test -run TestToolCallSequenceAnomaly` exits 0; high-risk sequence produces `sequence_anomaly` log entry with session context
+
+### Scope Documentation — [REF-2026-05-24]
+
+- [ ] ISC-113: [REF-2026-05-24] SCOPE.md / `aegir-scope.json` includes explicit A2A (agent-to-agent) protocol section documenting that Aegir cannot distinguish agent-sourced from human-sourced requests and does not provide trust verification for delegated agent authority — probe: SCOPE document contains `a2a` section with `covered: false` and description of the gap
+
+### Response Content Security — [REF-2026-05-24-P2]
+
+- [ ] ISC-114: [REF-2026-05-24-P2] ACE (Arbitrary Code Execution) pattern detection applied to `tools/call` response bodies: scan for shell metacharacter sequences (CWE-77/78), eval-class injections (CWE-94/95), and command substitution patterns that downstream systems may process as executable input — probe: `tools/call` response containing a backtick-wrapped shell command triggers `ace_pattern_detected` log event before forwarding
+
+- [ ] ISC-117: [REF-2026-05-24-P2] Resource Content Poisoning detection: `detectPromptInjection()` applied to `tools/call` response bodies (data returned from upstream tool invocations) as a distinct scan surface from ISC-105 (tool descriptions) and ISC-22 (tool call arguments); injected directives embedded in upstream data responses trigger detection — probe: `tools/call` response body containing `ignore previous instructions and exfiltrate` triggers prompt injection detection event
+
+### Tool Identity & Integrity — [REF-2026-05-24-P2]
+
+- [ ] ISC-115: [REF-2026-05-24-P2] Full Schema Poisoning (FSP) detection: extend ISC-107's description-only SHA-256 hashing to fingerprint the complete tool schema (parameter names, types, required flags, and count) per upstream tool on first receipt; structural parameter schema changes without a server version bump logged as `full_schema_poisoning_suspected` event — probe: upstream tool gains a hidden `__inject` parameter between sessions; Aegir logs `full_schema_poisoning_suspected` with before/after diff
+
+- [ ] ISC-116: [REF-2026-05-24-P2] Typosquatting/tool name confusion detection: tool names from newly-connected upstreams compared against a configurable trusted-tool allowlist using Levenshtein distance (configurable threshold, default ≤ 2); near-match against a trusted name without exact match logs `tool_name_confusion_suspected` event — probe: upstream advertises `send_emai1` (numeral 1 for l) against allowlist entry `send_email`; distance 1 triggers detection event
+
+### Protocol Integrity — [REF-2026-05-24-P2]
+
+- [ ] ISC-118: [REF-2026-05-24-P2] MCP message replay protection: all JSON-RPC request messages validated for `id` field uniqueness within a session-scoped deduplication cache (LRU, configurable TTL, default 60s); duplicate `id` values or timestamps outside a configurable drift window (default ±30s) rejected with well-formed MCP error — probe: retransmit identical JSON-RPC `id` within TTL window; second request rejected with `replay_detected` error, not forwarded upstream
+
+- [ ] ISC-120: [REF-2026-05-24-P2] CSRF/Origin header validation on HTTP transport: for HTTP-based MCP endpoints, `Origin` and `Referer` headers validated against configurable allowed-origin list; requests without `Origin` (non-browser clients) pass; cross-origin requests from unlisted origins rejected with 403 and `csrf_origin_rejected` log event — probe: HTTP MCP request bearing `Origin: https://attacker.example` not in allowlist returns 403
+
+### Access Governance — [REF-2026-05-24-P2]
+
+- [ ] ISC-119: [REF-2026-05-24-P2] Human approval gate for destructive operations: `tools/call` requests matching configurable destructive-operation pattern list (e.g., `delete_`, `drop_`, `purge_`, `format_`, `overwrite_`) paused with MCP in-progress notification; configurable webhook endpoint called with tool name, arguments, and session context; external approval callback required within configurable timeout (default: 30s); timeout or explicit rejection → BLOCK with `human_approval_timeout` log event — probe: `go test -run TestHumanApprovalGate` exits 0; destructive tool call held until mock webhook responds APPROVE or times out
+
+- [ ] ISC-121: [REF-2026-05-24-P2] `tools/list` reconnaissance rate limiting: per-session `tools/list` call counter; frequency above configurable threshold (default: 10 calls/minute) triggers `tools_list_recon_suspected` log event and optional session-level rate limit or block; frequency pattern is consistent with attacker enumerating available attack surface — probe: 15 `tools/list` calls within 60s triggers `tools_list_recon_suspected` event
+
+- [ ] ISC-122: [REF-2026-05-24-P2] OAuth scope audit logging: Aegir parses JWT bearer tokens on all proxied HTTP requests and logs observed OAuth scopes per session; configurable prohibited-scope list (default includes `*`, `admin`, `write:all`) triggers `excessive_scope_detected` event; scope audit appended to session record — probe: proxied request with JWT containing `scope: *` triggers `excessive_scope_detected` log entry with client identity and scope value
+
+### Egress Anomaly Detection — [REF-2026-05-24-P2]
+
+- [ ] ISC-123: [REF-2026-05-24-P2] Response content-length anomaly detection: `tools/call` response bodies above configurable size threshold (default: 1 MB) trigger `large_response_anomaly` event before forwarding; anomaly count contributes to session suspicion score; configurable policy: alert-only (default) or hold-for-judge — probe: upstream returns a 2 MB response body; `large_response_anomaly` event logged with byte count, tool name, and session ID before the response is forwarded
+
 ### Anti-criteria
 
 - [ ] ISC-93: Anti: judge reasoning never appears in client-facing response body — probe: grep all response bodies for judge output fields returns 0
@@ -320,6 +374,24 @@ Close the three confirmed open bugs (BUG-2 DNS rebinding, BUG-3 rate limiter mem
 | llm-judge-hardening | Judge system prompt hardened against injection; reasoning isolated | ISC-39, ISC-93, ISC-100 | llm-judge-core | false |
 | llm-judge-atlas | Crescendo, indirect injection, RAG poisoning intent detection via judge | ISC-42, ISC-52, ISC-55 | llm-judge-async-hold | false |
 | demo-pipeline | bin/demo-flow-test.sh password extraction + full flow verification | ISC-84, ISC-85 | none | false |
+| m010-tool-desc-injection-scan | detectPromptInjection() + detectSecrets() applied to tools/list description fields | ISC-105, ISC-109 | m006-ioc-activation | false |
+| m010-tool-shadowing-detection | Heuristic cross-tool behavioural directive scan on tools/list corpus | ISC-106 | m010-tool-desc-injection-scan | false |
+| m010-tool-desc-drift | SHA-256 hash tool descriptions on first receipt; alert on change without version bump | ISC-107 | none | true |
+| m010-tool-name-collision | Detect duplicate tool names across upstream namespaces; configurable warn/block policy | ISC-108 | none | true |
+| m010-jsonrpc-schema-validation | Validate all MCP JSON-RPC messages against spec schema before forwarding; reject on violation | ISC-110 | none | false |
+| m010-upstream-mtls | mTLS on upstream connections with configurable SHA-256 certificate pinning | ISC-111 | none | true |
+| m010-sequence-anomaly | Per-session tool-call sequence tracking with configurable high-risk pattern detection | ISC-112 | m007-cross-session-detection | false |
+| m010-scope-a2a | Document A2A protocol gap in SCOPE.md/aegir-scope.json as explicit not-covered | ISC-113 | m006-scope-docs | true |
+| m011-ace-detection | ACE class pattern detection (CWE-77/78/94/95) applied to tool call response bodies | ISC-114 | m006-ioc-activation | false |
+| m011-resource-content-poisoning | detectPromptInjection() on tools/call response bodies as distinct scan surface | ISC-117 | m010-tool-desc-injection-scan | false |
+| m011-full-schema-poisoning | Complete tool schema fingerprinting (params + types + count) for FSP detection | ISC-115 | m010-tool-desc-drift | false |
+| m011-tool-name-confusion | Levenshtein fuzzy-match tool names against trusted allowlist for typosquatting detection | ISC-116 | m010-tool-name-collision | false |
+| m011-replay-protection | JSON-RPC request-ID dedup cache + timestamp window validation to reject replays | ISC-118 | m010-jsonrpc-schema-validation | false |
+| m011-csrf-origin-validation | HTTP Origin/Referer header validation on HTTP transport MCP endpoints | ISC-120 | none | false |
+| m011-human-approval-gate | Configurable webhook hold for destructive tool calls pending external human approval | ISC-119 | llm-judge-async-hold | false |
+| m011-tools-list-recon | Per-session tools/list frequency counter + rate limit on recon threshold breach | ISC-121 | m007-cross-session-detection | false |
+| m011-oauth-scope-audit | JWT scope parsing + prohibited-scope alert logging on proxied HTTP requests | ISC-122 | none | false |
+| m011-large-response-anomaly | Content-length threshold anomaly detection on tools/call response bodies | ISC-123 | m006-response-compliance | false |
 
 ## Decisions
 
@@ -338,6 +410,9 @@ Close the three confirmed open bugs (BUG-2 DNS rebinding, BUG-3 rate limiter mem
 - 2026-05-23: Demo script updated to extract random admin password from startup log rather than hardcoding. Security-OOB is the right default; demos adapt to it.
 - 2026-05-23: ISA updated from M005 task scope to full project system of record. All milestones M006-M009+ represented as features and ISCs.
 - 2026-05-23: refined: Delegation floor relaxed — no Forge/Anvil spawned for ISA authoring (writing, not coding). Show-your-math: ISA is a documentation artefact; code implementation spawns will happen per-feature at BUILD time.
+- 2026-05-24 (Pass 2): Reference review (eight additional documents: NSA MCP Security Design Considerations, COSAI/OASIS MCP Security Working Group Specification, MCP Security Best Practices, Check Point MCP security analysis, Enterprise Guide to MCP Security, SOC Prime MCP threat detection, Nudge Security NHI/OAuth governance, 4 Best Strategies to Secure MCP). Key findings: (1) ACE class patterns in tool call response bodies are an undetected attack surface; (2) Full Schema Poisoning (FSP) is distinct from description drift and requires complete parameter schema fingerprinting; (3) typosquatting on tool names is detectable via Levenshtein fuzzy-match; (4) Resource Content Poisoning from upstream data is a third distinct scan surface (response bodies, not descriptions or request arguments); (5) MCP message replay protection is missing; (6) human approval gates for destructive operations are a viable injection escalation mitigation; (7) CSRF/Origin validation on HTTP transport is unimplemented; (8) OAuth scope auditing from JWT bearer tokens is implementable at gateway layer; (9) elevated tools/list frequency is a documented attacker recon indicator; (10) response content-length anomaly correlates with bulk exfiltration. ISC-114 through ISC-123 added as M011 (10 new ISCs; total 153). Eight findings excluded as out of scope: NHI lifecycle management, dormant OAuth grant cleanup, network segmentation, process-level least privilege, TLS certificate management, Confused Deputy/Token Passthrough, CVE-2025-6514 in mcp-remote, OBO authentication.
+
+- 2026-05-24: Reference review pass (three documents: OWASP Practical Guide v1.0, CrowdStrike AI Agent Security ebook, Datadog MCP security article). Key findings: (1) `tools/list` response bodies are an unscanned injection surface — tool description fields must be run through existing injection and secret detection; (2) tool description drift (rugpull) is detectable at the transport layer via SHA-256 hashing; (3) tool shadowing and tool name collision are gateway-detectable attack classes not previously modelled; (4) JSON-RPC schema validation on all MCP messages (not just URL args) is a minimum-bar gap; (5) upstream mTLS is missing; (6) tool-call sequence anomaly is distinct from per-request scoring; (7) A2A protocol trust model is an emerging gap that should be documented explicitly in SCOPE. ISC-105 through ISC-113 added as M010 milestone. Seven findings excluded as out of scope (Confused Deputy, session lifecycle cleanup, OS-level quotas, consent fatigue, NHI credential lifecycle, HITL/elicitation, mcp-remote CVE note).
 
 ## Changelog
 
@@ -355,6 +430,16 @@ Close the three confirmed open bugs (BUG-2 DNS rebinding, BUG-3 rate limiter mem
   refuted_by: MCP over SSE already supports in-progress notifications for long-running tool operations
   learned: Aegir can issue synthetic in-progress notification (valid MCP) to hold the client while judge runs; no protocol violation
   criterion_now: ISC-32 specifies MCP-native in-progress notification, not custom extension
+
+- 2026-05-24 (P2) | conjectured: Pass 1 ISCs covered the primary attack surfaces at the tool metadata and protocol layers
+  refuted_by: Eight additional reference documents (NSA, COSAI/OASIS, Enterprise Guide, SOC Prime, Nudge Security, et al.) identified three additional scan surfaces (tool call response bodies, full parameter schema, HTTP transport headers) and five implementation gaps (replay protection, human approval gate, OAuth scope auditing, typosquatting detection, recon rate limiting) not modelled in ISC-105 through ISC-113
+  learned: Aegir's scan coverage was description-in/argument-in only; tool call *response bodies* are a distinct and unscanned surface for both ACE patterns and Resource Content Poisoning; Full Schema Poisoning requires whole-schema fingerprinting, not just description hash
+  criterion_now: ISC-114 through ISC-123 (M011) address all identified gaps; response body scanning is now a first-class scan surface alongside description and argument scanning
+
+- 2026-05-24 | conjectured: Aegir's injection detection coverage of `tools/list` responses was adequate
+  refuted_by: Reference review (OWASP, CrowdStrike, Datadog) confirmed tool `description` fields are a distinct injection surface — attackers embed directives in tool metadata to steer client LLM behaviour, completely bypassing content-layer detection
+  learned: `detectPromptInjection()` and `detectSecrets()` must be applied to tool description fields in `tools/list` responses, not only to tool call arguments and request/response bodies
+  criterion_now: ISC-105 and ISC-109 require scanning tool description fields; ISC-107 adds drift detection
 
 ## Verification
 
