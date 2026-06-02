@@ -13,6 +13,7 @@ import (
 
 	"github.com/aegishjalmur/aegir/internal/config"
 	"github.com/aegishjalmur/aegir/internal/logging"
+	wahandler "github.com/aegishjalmur/aegir/internal/auth/webauthn"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -29,6 +30,9 @@ type Manager struct {
 	sessions       map[string]*Session
 	tokenBlacklist sync.Map // stores revoked tokens: token -> expiration time
 	oauthStates    sync.Map // stores OAuth CSRF states: state -> expiration time
+
+	// WebAuthn is non-nil only when config.Auth.WebAuthn.RPID is set.
+	WebAuthn *wahandler.Handler
 }
 
 // User represents a system user
@@ -37,6 +41,7 @@ type User struct {
 	Username     string    `json:"username"`
 	Email        string    `json:"email"`
 	PasswordHash string    `json:"-"`
+	MFASecret    string    `json:"-"` // reserved for future TOTP compatibility
 	Roles        []string  `json:"roles"`
 	MFAEnabled   bool      `json:"mfa_enabled"`
 	CreatedAt    time.Time `json:"created_at"`
@@ -101,6 +106,15 @@ func New(config config.Auth, logger *logging.Logger) (*Manager, error) {
 		users:     make(map[string]*User),
 		apiKeys:   make(map[string]*APIKey),
 		sessions:  make(map[string]*Session),
+	}
+
+	// Initialise WebAuthn handler if RPID is configured (optional feature).
+	if config.WebAuthn.RPID != "" {
+		waHandler, err := wahandler.NewHandler(config.WebAuthn.RPID, config.WebAuthn.RPOrigin, logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialise WebAuthn handler: %w", err)
+		}
+		mgr.WebAuthn = waHandler
 	}
 
 	// Create default admin user for development

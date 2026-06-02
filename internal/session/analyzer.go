@@ -13,11 +13,34 @@ import (
 // ConversationalThreatAnalyzer detects multi-turn attack patterns
 type ConversationalThreatAnalyzer struct {
 	sessions       map[string]*SessionContext
+	userSessions   map[string]map[string]*SessionContext // user_id -> session_id -> session
 	mutex          sync.RWMutex
 	logger         *logging.Logger
 	config         AnalyzerConfig
 	attackPatterns map[string]*AttackPattern
 	done           chan struct{}
+}
+
+// SlidingWindowStats tracks repetition statistics over sliding windows
+type SlidingWindowStats struct {
+	WindowStart      time.Time             `json:"window_start"`
+	MessageCount     int                   `json:"message_count"`
+	QueryPatterns    []string              `json:"query_patterns"`
+	RepetitionCount  int                   `json:"repetition_count"`
+	UniformityScore  float64               `json:"uniformity_score"`
+	MaxRepetition    int                   `json:"max_repetition"`
+	RepetitionHistory []int                `json:"repetition_history"`
+}
+
+// ModelExtractionReport tracks model extraction detection results
+type ModelExtractionReport struct {
+	Detected           bool     `json:"detected"`
+	UniformityScore    float64  `json:"uniformity_score"`
+	RepetitionCount    int      `json:"repetition_count"`
+	MaxRepetition      int      `json:"max_repetition"`
+	UniformQueries     []string `json:"uniform_queries"`
+	DetectionMethod    string   `json:"detection_method"`
+	ConfidenceLevel    string   `json:"confidence_level"`
 }
 
 // SessionContext tracks conversation state and threat indicators
@@ -33,6 +56,7 @@ type SessionContext struct {
 	History        []MessageContext      `json:"history"`
 	Flags          map[string]int        `json:"flags"`
 	Risk           string                `json:"risk_level"`
+	SlidingWindow  *SlidingWindowStats   `json:"sliding_window"`
 }
 
 // MessageContext represents a single message in conversation
@@ -57,12 +81,15 @@ type AttackPattern struct {
 
 // AnalyzerConfig configures the conversational threat analyzer
 type AnalyzerConfig struct {
-	MaxSessionAge       time.Duration `json:"max_session_age"`
-	MaxHistorySize      int          `json:"max_history_size"`
-	ThreatThreshold     float64      `json:"threat_threshold"`
-	CleanupInterval     time.Duration `json:"cleanup_interval"`
-	JailbreakThreshold  float64      `json:"jailbreak_threshold"`
-	RoleEscalationLimit int          `json:"role_escalation_limit"`
+	MaxSessionAge           time.Duration `json:"max_session_age"`
+	MaxHistorySize          int          `json:"max_history_size"`
+	ThreatThreshold         float64      `json:"threat_threshold"`
+	CleanupInterval         time.Duration `json:"cleanup_interval"`
+	JailbreakThreshold      float64      `json:"jailbreak_threshold"`
+	RoleEscalationLimit     int          `json:"role_escalation_limit"`
+	SlidingWindowSize       time.Duration `json:"sliding_window_size"`
+	RepetitionThreshold     int          `json:"repetition_threshold"`
+	UniformityThreshold     float64      `json:"uniformity_threshold"`
 }
 
 // ThreatAssessment contains the analysis result
@@ -103,9 +130,19 @@ func NewConversationalThreatAnalyzer(config AnalyzerConfig, logger *logging.Logg
 	if config.RoleEscalationLimit <= 0 {
 		config.RoleEscalationLimit = 3
 	}
+	if config.SlidingWindowSize <= 0 {
+		config.SlidingWindowSize = 5 * time.Minute
+	}
+	if config.RepetitionThreshold <= 0 {
+		config.RepetitionThreshold = 5
+	}
+	if config.UniformityThreshold <= 0 {
+		config.UniformityThreshold = 0.8
+	}
 
 	analyzer := &ConversationalThreatAnalyzer{
 		sessions:       make(map[string]*SessionContext),
+		userSessions:   make(map[string]map[string]*SessionContext),
 		logger:         logger,
 		config:         config,
 		attackPatterns: make(map[string]*AttackPattern),
@@ -192,6 +229,9 @@ func (cta *ConversationalThreatAnalyzer) performConversationalAnalysis(session *
 
 	// Analyze emotional manipulation
 	cta.analyzeEmotionalManipulation(session, assessment)
+
+	// Detect model extraction via sliding window repetition
+	cta.detectModelExtraction(session, assessment)
 
 	// Calculate overall threat score
 	assessment.CurrentThreatScore = cta.calculateOverallThreat(session, assessment)
@@ -480,9 +520,22 @@ func (cta *ConversationalThreatAnalyzer) getOrCreateSession(sessionID, userID st
 		History:        []MessageContext{},
 		Flags:          make(map[string]int),
 		Risk:           "minimal",
+		SlidingWindow: &SlidingWindowStats{
+			WindowStart:     time.Now(),
+			MessageCount:    0,
+			QueryPatterns:   make([]string, 0),
+			RepetitionCount: 0,
+		},
 	}
 
 	cta.sessions[sessionID] = session
+
+	// Track user -> sessions mapping for cross-session analysis
+	if _, exists := cta.userSessions[userID]; !exists {
+		cta.userSessions[userID] = make(map[string]*SessionContext)
+	}
+	cta.userSessions[userID][sessionID] = session
+
 	return session
 }
 
@@ -577,4 +630,194 @@ func (cta *ConversationalThreatAnalyzer) DeleteSession(sessionID string) {
 	defer cta.mutex.Unlock()
 
 	delete(cta.sessions, sessionID)
+}
+
+// detectModelExtraction detects uniform query patterns from same user over sliding window
+// This helps detect model extraction attacks where attackers send many similar queries
+func (cta *ConversationalThreatAnalyzer) detectModelExtraction(session *SessionContext, assessment *ThreatAssessment) {
+	if session.SlidingWindow == nil {
+		return
+	}
+
+	now := time.Now()
+	windowSize := cta.config.SlidingWindowSize
+
+	// Clean up old messages outside the sliding window
+	validMessages := []MessageContext{}
+	for _, msg := range session.History {
+		if now.Sub(msg.Timestamp) <= windowSize {
+			validMessages = append(validMessages, msg)
+		}
+	}
+	session.History = validMessages
+
+	// Update sliding window stats
+	window := session.SlidingWindow
+	window.WindowStart = now.Add(-windowSize)
+	window.MessageCount = len(validMessages)
+
+	// Extract normalized query patterns (lowercase, trimmed, removed extra spaces)
+	queryPatterns := make([]string, len(validMessages))
+	for i, msg := range validMessages {
+		normalized := strings.ToLower(strings.TrimSpace(msg.Content))
+		// Remove extra whitespace
+		normalized = strings.Join(strings.Fields(normalized), " ")
+		queryPatterns[i] = normalized
+	}
+	window.QueryPatterns = queryPatterns
+
+	// Calculate repetition and uniformity
+	repetitionMap := make(map[string]int)
+	for _, pattern := range queryPatterns {
+		repetitionMap[pattern]++
+	}
+
+	maxRepetition := 0
+	repetitionCount := 0
+	uniformQueries := []string{}
+
+	for pattern, count := range repetitionMap {
+		if count > 1 {
+			repetitionCount += count - 1 // Count excess repetitions
+		}
+		if count > maxRepetition {
+			maxRepetition = count
+		}
+		if count >= 2 && float64(count)/float64(len(queryPatterns)) >= cta.config.UniformityThreshold {
+			// Query is uniform (appears frequently)
+			uniformQueries = append(uniformQueries, pattern)
+		}
+	}
+
+	window.RepetitionCount = repetitionCount
+	window.MaxRepetition = maxRepetition
+
+	// Update repetition history (keep last 10 entries)
+	if len(window.RepetitionHistory) >= 10 {
+		window.RepetitionHistory = window.RepetitionHistory[1:]
+	}
+	window.RepetitionHistory = append(window.RepetitionHistory, repetitionCount)
+
+	// Calculate uniformity score (0-1)
+	if len(queryPatterns) > 0 {
+		uniqueRatio := float64(len(repetitionMap)) / float64(len(queryPatterns))
+		window.UniformityScore = 1.0 - uniqueRatio
+	} else {
+		window.UniformityScore = 0.0
+	}
+
+	// Detect model extraction if thresholds exceeded
+	report := cta.generateModelExtractionReport(window, maxRepetition, uniformQueries)
+	if report.Detected {
+		assessment.Indicators["model_extraction"]++
+		assessment.Indicators["uniform_query_repetition"] += repetitionCount
+		assessment.AttackPatterns = append(assessment.AttackPatterns, "model_extraction")
+		assessment.Reasoning = append(assessment.Reasoning,
+			fmt.Sprintf("Model extraction pattern detected: %d uniform queries, max repetition %d, confidence %s",
+				len(uniformQueries), maxRepetition, report.ConfidenceLevel))
+		assessment.JailbreakRisk += 0.2 * report.UniformityScore
+
+		// Block if high confidence extraction detected
+		if report.ConfidenceLevel == "high" {
+			assessment.CurrentThreatScore += 0.3
+		}
+	}
+}
+
+// generateModelExtractionReport creates a detailed report on model extraction detection
+func (cta *ConversationalThreatAnalyzer) generateModelExtractionReport(
+	window *SlidingWindowStats,
+	maxRepetition int,
+	uniformQueries []string,
+) *ModelExtractionReport {
+	report := &ModelExtractionReport{
+		UniformQueries: uniformQueries,
+	}
+
+	// Check detection thresholds
+	minMessagesForDetection := 5
+	minUniformityScore := 0.5
+	minRepetitionThreshold := cta.config.RepetitionThreshold
+
+	// Multiple detection methods
+	methods := []string{}
+
+	// Method 1: High uniformity with sufficient repetitions
+	if window.MessageCount >= minMessagesForDetection &&
+		window.UniformityScore >= minUniformityScore &&
+		window.RepetitionCount >= minRepetitionThreshold {
+		methods = append(methods, "uniformity_repetition")
+	}
+
+	// Method 2: Very high max repetition (identical queries)
+	if maxRepetition >= 3 && window.MessageCount >= 3 {
+		methods = append(methods, "high_max_repetition")
+	}
+
+	// Method 3: Consistent repetition in history (sliding window pattern)
+	if len(window.RepetitionHistory) >= 3 {
+		stableRepetition := true
+		lastVal := window.RepetitionHistory[0]
+		for _, val := range window.RepetitionHistory[1:] {
+			if val != lastVal {
+				stableRepetition = false
+				break
+			}
+		}
+		if stableRepetition && lastVal >= minRepetitionThreshold/2 {
+			methods = append(methods, "stable_repetition_pattern")
+		}
+	}
+
+	report.Detected = len(methods) > 0
+	report.DetectionMethod = strings.Join(methods, "+")
+
+	// Calculate confidence level
+	if len(methods) >= 2 {
+		report.ConfidenceLevel = "high"
+	} else if len(methods) == 1 {
+		report.ConfidenceLevel = "medium"
+	} else {
+		report.ConfidenceLevel = "low"
+	}
+
+	// Set final metrics
+	report.UniformityScore = window.UniformityScore
+	report.RepetitionCount = window.RepetitionCount
+	report.MaxRepetition = maxRepetition
+
+	return report
+}
+
+// GetSlidingWindowReport returns current sliding window analysis for a session
+func (cta *ConversationalThreatAnalyzer) GetSlidingWindowReport(sessionID string) *SlidingWindowStats {
+	cta.mutex.RLock()
+	defer cta.mutex.RUnlock()
+
+	if session, exists := cta.sessions[sessionID]; exists && session.SlidingWindow != nil {
+		return session.SlidingWindow
+	}
+	return nil
+}
+
+// GetAllModelExtractionReports returns reports for all sessions
+func (cta *ConversationalThreatAnalyzer) GetAllModelExtractionReports() map[string]*ModelExtractionReport {
+	cta.mutex.RLock()
+	defer cta.mutex.RUnlock()
+
+	reports := make(map[string]*ModelExtractionReport)
+
+	for sessionID, session := range cta.sessions {
+		if session.SlidingWindow != nil {
+			report := &ModelExtractionReport{
+				UniformityScore:  session.SlidingWindow.UniformityScore,
+				RepetitionCount:  session.SlidingWindow.RepetitionCount,
+				MaxRepetition:    session.SlidingWindow.MaxRepetition,
+				UniformQueries:   session.SlidingWindow.QueryPatterns,
+			}
+			reports[sessionID] = report
+		}
+	}
+
+	return reports
 }

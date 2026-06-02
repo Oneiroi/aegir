@@ -110,6 +110,40 @@ func TestIsRestrictedIP_PublicAddressAllowed(t *testing.T) {
 	}
 }
 
+// TestDNSRebindingSSRF simulates a DNS rebinding attack: an attacker-controlled
+// hostname initially resolves to a benign IP but switches to the AWS/GCE IMDS
+// address (169.254.169.254) by the time the TCP connection is established.
+// secureDialContext defends against this by resolving the hostname once,
+// checking every returned IP before dialing, so even if DNS returns a
+// restricted IP the connection is blocked.
+func TestDNSRebindingSSRF(t *testing.T) {
+	// Inject a mock resolver that maps any hostname to the link-local IMDS IP,
+	// simulating a DNS rebinding payload delivered at connection time.
+	orig := dnsResolver
+	dnsResolver = &mockResolver{addrs: []string{"169.254.169.254"}}
+	defer func() { dnsResolver = orig }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err := secureDialContext(ctx, "tcp", "attacker.example.com:80")
+	if err == nil {
+		t.Fatal("expected SSRF error for DNS rebinding to 169.254.169.254, got nil")
+	}
+	if !strings.Contains(err.Error(), "SSRF") {
+		t.Fatalf("expected SSRF error, got %q", err.Error())
+	}
+}
+
+// mockResolver implements the LookupHost interface used by secureDialContext.
+type mockResolver struct {
+	addrs []string
+}
+
+func (m *mockResolver) LookupHost(ctx context.Context, host string) ([]string, error) {
+	return m.addrs, nil
+}
+
 // TestIsRestrictedIP_Categories spot-checks every category enforced by the
 // SSRF policy so a regression in any branch is caught.
 func TestIsRestrictedIP_Categories(t *testing.T) {

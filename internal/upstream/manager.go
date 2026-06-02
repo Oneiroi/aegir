@@ -17,6 +17,17 @@ import (
 	"github.com/aegishjalmur/aegir/internal/logging"
 )
 
+// hostResolver is the interface used by secureDialContext for DNS lookups.
+// The default implementation wraps net.DefaultResolver; tests may substitute
+// a mock to simulate DNS rebinding without real DNS queries.
+type hostResolver interface {
+	LookupHost(ctx context.Context, host string) ([]string, error)
+}
+
+// dnsResolver is the active hostResolver. Tests replace this to inject controlled
+// DNS responses (e.g., a hostname that "rebinds" to a restricted IP).
+var dnsResolver hostResolver = net.DefaultResolver
+
 // secureDialContext is a net.Dialer-compatible DialContext that defends against
 // DNS rebinding (TOCTOU) attacks by resolving the destination host once,
 // validating every resolved IP against the SSRF policy enforced by
@@ -44,7 +55,7 @@ func secureDialContext(ctx context.Context, network, addr string) (net.Conn, err
 		}
 		addrs = []string{ip.String()}
 	} else {
-		resolved, lookupErr := net.DefaultResolver.LookupHost(ctx, host)
+		resolved, lookupErr := dnsResolver.LookupHost(ctx, host)
 		if lookupErr != nil {
 			return nil, fmt.Errorf("dns lookup failed for %q: %w", host, lookupErr)
 		}

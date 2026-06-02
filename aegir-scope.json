@@ -1,0 +1,148 @@
+{
+  "version": "1.0",
+  "generated": "2026-06-02",
+  "transport_layer_ceiling_percent": 62,
+  "atlas_techniques": [
+    {
+      "id": "AML.T0012",
+      "name": "Valid Accounts",
+      "status": "partial",
+      "mechanism": "JWT + OAuth2 + API key auth enforced; WebAuthn/FIDO2 MFA planned (ISC-4 through ISC-6.1)",
+      "notes": "Auth layer present and active (ISC-66 confirmed). Phishing-resistant MFA not yet implemented — registration and assertion ceremonies missing. Single-factor credential compromise = full access until WebAuthn lands."
+    },
+    {
+      "id": "AML.T0022",
+      "name": "Denial of ML Service",
+      "status": "partial",
+      "mechanism": "Per-IP rate limiting with LRU cap at max_tracked_ips",
+      "notes": "Memory-bounded rate limiter implemented (ISC-2, ISC-3 implementations correct; probe test names need renaming). Per-user identity rate limiting not yet implemented (ISC-14) — distributed botnet across many IPs bypasses per-IP gate."
+    },
+    {
+      "id": "AML.T0050",
+      "name": "Execute LLM Prompt",
+      "status": "implemented",
+      "mechanism": "JWT auth enforced on all MCP endpoints; unauthenticated requests return 401 (ISC-66)",
+      "notes": "Confirmed in code: internal/server/server.go:154."
+    },
+    {
+      "id": "AML.T0051.000",
+      "name": "Direct Prompt Injection",
+      "status": "implemented",
+      "mechanism": "22+ active patterns post-normalisation via IOC trie; case/spacing/unicode normalisation applied pre-match",
+      "notes": "IOC patterns wired and pre-compiled at startup (ISC-7, ISC-8 confirmed). Pattern count: 61 IOC patterns active."
+    },
+    {
+      "id": "AML.T0051.001",
+      "name": "Indirect Prompt Injection (via tool results)",
+      "status": "planned",
+      "mechanism": "detectPromptInjection() to be applied to tool call results before forwarding (M008, ISC-22)",
+      "notes": "Currently not scanned. Tool call response bodies are a distinct unscanned surface. Planned in M008."
+    },
+    {
+      "id": "AML.T0051.002",
+      "name": "Triggered Injection",
+      "status": "implemented",
+      "mechanism": "IOC pattern active post-M006; triggered injection pattern detected",
+      "notes": "Covered by active IOC pattern set (ISC-47)."
+    },
+    {
+      "id": "AML.T0053",
+      "name": "Agent Tool Invocation Abuse",
+      "status": "implemented",
+      "mechanism": "validateResourceURI() on URL-typed tool arguments (ISC-12 confirmed)",
+      "notes": "Confirmed in code: internal/server/mcp_proxy.go:800. SSRF via tool args blocked."
+    },
+    {
+      "id": "AML.T0054.001",
+      "name": "Jailbreak — DAN",
+      "status": "implemented",
+      "mechanism": "Active IOC pattern + anomaly scoring",
+      "notes": "DAN prompt blocked by pattern detection (ISC-49)."
+    },
+    {
+      "id": "AML.T0054.003",
+      "name": "System Prompt Override",
+      "status": "implemented",
+      "mechanism": "IOC active post-M006 (ISC-8 confirmed)",
+      "notes": "Roleplay/act-as pattern confirmed in code: (?i)(?:role play|act as|pretend to be) triggers detection."
+    },
+    {
+      "id": "AML.T0054.004",
+      "name": "Roleplay Jailbreak",
+      "status": "implemented",
+      "mechanism": "IOC pattern post-M006",
+      "notes": "'act as an unrestricted AI' blocked (ISC-51)."
+    },
+    {
+      "id": "AML.T0054.007",
+      "name": "Crescendo (Gradual Escalation)",
+      "status": "planned",
+      "mechanism": "LLM judge layer required (M009, ISC-42, ISC-52)",
+      "notes": "Structurally undetectable at transport layer. Slow multi-turn escalation without explicit keywords cannot be caught by pattern matching. Requires semantic/behavioural analysis in the judge layer. This is above the 62% ceiling."
+    },
+    {
+      "id": "AML.T0056",
+      "name": "Meta Prompt Extraction",
+      "status": "planned",
+      "mechanism": "Pure extraction patterns (no override verb required) planned in M008 (ISC-25)",
+      "notes": "'what are your instructions verbatim' class patterns not yet active. Planned in M008."
+    },
+    {
+      "id": "AML.T0057",
+      "name": "LLM Data Leakage",
+      "status": "partial",
+      "mechanism": "Response compliance scan active (ISC-11 confirmed); secret detection patterns partially active; Azure SAS, GCP SA JSON, Slack tokens not yet added (ISC-17 through ISC-19 pending M007)",
+      "notes": "Core PII/PHI/PCI response scanning confirmed in code (internal/server/mcp_proxy.go:340). Extended secret patterns pending M007."
+    },
+    {
+      "id": "AML.T0070",
+      "name": "RAG Poisoning",
+      "status": "planned",
+      "mechanism": "LLM judge layer detects intent (M009, ISC-42, ISC-55)",
+      "notes": "Requires semantic intent detection above the 62% transport-layer ceiling. Planned in M009 judge layer."
+    },
+    {
+      "id": "SSRF.001-004",
+      "name": "SSRF via Tool Arguments",
+      "status": "partial",
+      "mechanism": "Parse-time IP/hostname validation via validateResourceURI(); connection-time re-validation pending (BUG-2)",
+      "notes": "ISC-1 and ISC-12 implementations correct. DNS rebinding bypass still possible (BUG-2): parse-time validation can be bypassed by attacker-controlled hostname resolving to private IP post-parse. Fix requires custom DialContext."
+    },
+    {
+      "id": "POLY.001-002",
+      "name": "Case and Spacing Bypass",
+      "status": "implemented",
+      "mechanism": "Pre-match normalisation: case folding, spacing collapse, unicode normalisation",
+      "notes": "Normalisation active on all pattern matching paths (ISC-58)."
+    },
+    {
+      "id": "POLY.003",
+      "name": "Leet Speak Bypass",
+      "status": "planned",
+      "mechanism": "Leet normalisation pass before pattern matching (M008, ISC-24, ISC-59)",
+      "notes": "Not yet active. ign0re all pr3v1ous 1nstruct1ons not yet caught. Planned in M008."
+    }
+  ],
+  "not_covered": [
+    "ML model weights, training pipelines, or fine-tuning infrastructure — Aegir is a transport-layer proxy",
+    "Supply chain or physical environment security",
+    "Attacks that require access to model internals or embeddings",
+    "Cross-deployment infrastructure correlation",
+    "SIEM functionality — Aegir produces audit logs suitable for SIEM ingestion; it is not a SIEM",
+    "The LLM judge's training or alignment — Aegir consumes a judge API/binary; it does not train one",
+    "Crescendo (AML.T0054.007) and distributed model extraction until M009 judge layer is implemented",
+    "Indirect prompt injection via tool results until M008",
+    "Leet-speak evasion variants until M008",
+    "WebAuthn/FIDO2 MFA until M007",
+    "NHI lifecycle management",
+    "Network segmentation and process-level least privilege",
+    "Confused Deputy attacks",
+    "OBO (On-Behalf-Of) authentication",
+    "Agent-to-agent trust verification (see a2a section)"
+  ],
+  "a2a": {
+    "covered": false,
+    "description": "Aegir cannot distinguish agent-sourced from human-sourced requests and does not provide trust verification for delegated agent authority. All requests arriving at the MCP transport layer are treated identically regardless of whether they originate from a human operator, an orchestrating agent, or a sub-agent in a delegation chain. Aegir has no mechanism to verify that a claimed agent identity is authorised to act on behalf of a principal, cannot detect authority escalation in agent delegation chains, and cannot enforce per-principal scope restrictions in multi-agent pipelines. This is a structural gap in the current architecture; closing it requires an A2A trust layer (signed delegation tokens, verified agent identity, per-principal scope enforcement) that is not planned in any current milestone.",
+    "isc_reference": "ISC-113"
+  }
+}

@@ -50,10 +50,20 @@ type TLS struct {
 
 // Auth configuration
 type Auth struct {
-	JWT     JWT     `json:"jwt"`
-	OAuth   OAuth   `json:"oauth"`
-	APIKeys APIKeys `json:"api_keys"`
-	MFA     MFA     `json:"mfa"`
+	JWT      JWT      `json:"jwt"`
+	OAuth    OAuth    `json:"oauth"`
+	APIKeys  APIKeys  `json:"api_keys"`
+	MFA      MFA      `json:"mfa"`
+	WebAuthn WebAuthn `json:"webauthn" mapstructure:"webauthn"`
+}
+
+// WebAuthn configuration for FIDO2/WebAuthn MFA.
+// Leave RPID empty to disable WebAuthn entirely.
+type WebAuthn struct {
+	// RPID is the Relying Party identifier, e.g. "example.com".
+	RPID string `json:"rpid" mapstructure:"rpid"`
+	// RPOrigin is the fully-qualified origin of the Relying Party, e.g. "https://example.com".
+	RPOrigin string `json:"rp_origin" mapstructure:"rp_origin"`
 }
 
 // JWT configuration

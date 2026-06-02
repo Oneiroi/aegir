@@ -34,10 +34,10 @@ func newTestRateLimiter(t *testing.T, maxTrackedIPs int) *RateLimiter {
 	return NewRateLimiter(cfg, logger)
 }
 
-// TestGetLimiter_EvictsOldestWhenCapReached verifies Bug 1's fix: when
-// MaxTrackedIPs is hit, GetLimiter must evict the oldest-last-seen entry
-// before inserting a new one, keeping the clients map bounded.
-func TestGetLimiter_EvictsOldestWhenCapReached(t *testing.T) {
+// TestRateLimiterMemoryCap verifies that when MaxTrackedIPs is reached,
+// GetLimiter evicts the oldest-last-seen entry before inserting a new one,
+// keeping the clients map bounded — the fix for BUG-3 (ISC-2).
+func TestRateLimiterMemoryCap(t *testing.T) {
 	rl := newTestRateLimiter(t, 3)
 	defer rl.Stop()
 
@@ -79,5 +79,28 @@ func TestGetLimiter_NoEvictionWhenCapDisabled(t *testing.T) {
 	}
 	if got := len(rl.clients); got != 10 {
 		t.Fatalf("expected 10 clients with cap disabled, got %d", got)
+	}
+}
+
+// TestRateLimiterRotation verifies that an IP-rotation attack using a large
+// number of unique source IPs does not grow the clients map beyond MaxTrackedIPs
+// (ISC-3 / BUG-3 fix).  Memory growth is the signal: if the cap is enforced the
+// map size stays constant after the first cap-fill.
+func TestRateLimiterRotation(t *testing.T) {
+	const cap = 100
+	rl := newTestRateLimiter(t, cap)
+	defer rl.Stop()
+
+	// Simulate an attacker cycling through many unique IPs.
+	for i := 0; i < 10_000; i++ {
+		rl.GetLimiter(fmt.Sprintf("203.0.113.%d.%d", i/256, i%256))
+		// The map must never grow beyond the cap.
+		if got := len(rl.clients); got > cap {
+			t.Fatalf("clients map grew to %d (cap=%d) after %d inserts — memory not bounded", got, cap, i+1)
+		}
+	}
+
+	if got := len(rl.clients); got > cap {
+		t.Fatalf("final map size %d exceeds cap %d", got, cap)
 	}
 }

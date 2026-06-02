@@ -1,6 +1,7 @@
 package sanitizer
 
 import (
+	"encoding/base64"
 	"regexp"
 	"strconv"
 	"strings"
@@ -27,6 +28,9 @@ type Manager struct {
 	iocPatterns    []IOCPattern // Raw patterns (with original ID, type, severity)
 	iocCompiled    []*regexp.Regexp
 	iocByName      map[string]*regexp.Regexp
+
+	// base64Re is used by detectBase64Injection for pre-scanning base64 blobs
+	base64Re *regexp.Regexp
 }
 
 // SanitizationResult contains the result of content sanitization
@@ -85,8 +89,9 @@ func (m *Manager) SanitizeContent(content string) *SanitizationResult {
 		result = m.sanitizeContent(result)
 	}
 
-	// Prompt injection detection
+	// Prompt injection detection (base64 pre-scan runs unconditionally when enabled)
 	if m.config.Sanitization.PromptInjection {
+		result = m.detectBase64Injection(result)
 		result = m.detectPromptInjection(result)
 	}
 
@@ -152,26 +157,108 @@ func (m *Manager) detectCommandInjection(result *SanitizationResult) *Sanitizati
 func (m *Manager) detectSecrets(result *SanitizationResult) *SanitizationResult {
 	content := result.Sanitized
 
-	// Secret patterns
+	// Secret patterns - extended with additional common secret types
 	patterns := []struct {
 		name        string
 		regex       string
 		replacement string
 		severity    string
 	}{
+		// API Keys and Tokens
 		{"api_key", `(?i)(api[_-]?key|apikey)\s*[=:]\s*['"]?([a-zA-Z0-9_-]{20,})['"]?`, "UNSAFE_SECRETS_REMOVED", "high"},
+		{"api_secret", `(?i)(api[_-]?secret|api[_-]?key[_-]?secret)\s*[=:]\s*['"]?([a-zA-Z0-9_-]{20,})['"]?`, "UNSAFE_SECRETS_REMOVED", "high"},
+		{"bearer_token", `(?i)bearer\s+[a-zA-Z0-9_-]{20,}`, "UNSAFE_SECRETS_REMOVED", "high"},
+		{"access_token", `(?i)(access|auth)_token\s*[=:]\s*['"]?([a-zA-Z0-9_-]{20,})['"]?`, "UNSAFE_SECRETS_REMOVED", "high"},
+		{"secret_token", `(?i)secret[_-]?token\s*[=:]\s*['"]?([a-zA-Z0-9_-]{20,})['"]?`, "UNSAFE_SECRETS_REMOVED", "high"},
+		{"client_secret", `(?i)client[_-]?secret\s*[=:]\s*['"]?([a-zA-Z0-9_-]{20,})['"]?`, "UNSAFE_SECRETS_REMOVED", "high"},
+		{"private_key", `(?i)(private[_-]?key|priv[_-]?key)\s*[=:]\s*['"]?([a-zA-Z0-9+/=]{40,})['"]?`, "UNSAFE_SECRETS_REMOVED", "critical"},
+		{"encryption_key", `(?i)(encryption|encrypt[_-]?key|enc[_-]?key)\s*[=:]\s*['"]?([a-zA-Z0-9]{16,})['"]?`, "UNSAFE_SECRETS_REMOVED", "critical"},
+		{"signing_key", `(?i)(signing[_-]?key|sign[_-]?key)\s*[=:]\s*['"]?([a-zA-Z0-9]{16,})['"]?`, "UNSAFE_SECRETS_REMOVED", "critical"},
+
+		// JWT Tokens
 		{"jwt_token", `eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*`, "UNSAFE_SECRETS_REMOVED", "high"},
-		// JWT header alone (base64-encoded {"typ":"JWT",...} or {"alg":...}). The
-		// canonical JWT header always starts with "eyJ" (base64 for `{"`) followed
-		// by a token-typ/alg key, so we anchor on those two characters and require
-		// a meaningful payload length to avoid catching arbitrary base64.
 		{"jwt_header", `eyJ[A-Za-z0-9_-]{18,}={0,2}`, "UNSAFE_SECRETS_REMOVED", "high"},
-		{"ssh_private_key", `-----BEGIN (RSA |DSA |EC )?PRIVATE KEY-----`, "UNSAFE_SECRETS_REMOVED", "critical"},
-		{"password", `(?i)(password|passwd|pwd)\s*[=:]\s*['"]?([^\s'"]{6,})['"]?`, "UNSAFE_SECRETS_REMOVED", "medium"},
+		{"jwks_uri", `(?i)jwks[_-]?uri\s*[=:]\s*['"]?(https?://[^\s'"]+)['"]?`, "UNSAFE_SECRETS_REMOVED", "medium"},
+
+		// Private Keys
+		{"ssh_private_key", `-----BEGIN (RSA |DSA |EC |OPENSSH )?PRIVATE KEY-----`, "UNSAFE_SECRETS_REMOVED", "critical"},
+		{"pgp_private_key", `-----BEGIN PGP PRIVATE KEY BLOCK-----`, "UNSAFE_SECRETS_REMOVED", "critical"},
+		{"gpg_private_key", `-----BEGIN GPG PRIVATE KEY BLOCK-----`, "UNSAFE_SECRETS_REMOVED", "critical"},
+
+		// Cloud Provider Credentials
 		{"aws_access_key", `AKIA[0-9A-Z]{16}`, "UNSAFE_SECRETS_REMOVED", "critical"},
-		{"github_token", `ghp_[a-zA-Z0-9]{36}`, "UNSAFE_SECRETS_REMOVED", "high"},
+		{"aws_secret_key", `(?i)aws[_-]?secret[_-]?access[_-]?key\s*[=:]\s*['"]?([a-zA-Z0-9+/]{40})['"]?`, "UNSAFE_SECRETS_REMOVED", "critical"},
+		{"aws_session_token", `(?i)aws[_-]?session[_-]?token\s*[=:]\s*['"]?(AQ[A-Za-z0-9+/]{100,})['"]?`, "UNSAFE_SECRETS_REMOVED", "critical"},
+		{"gcp_service_account", `(?i)(?:google|gcp)._?cloud[_-]?service[_-]?account[_-]?key`, "UNSAFE_SECRETS_REMOVED", "critical"},
+		{"gcp_service_account_type", `"type"\s*:\s*"service_account"`, "UNSAFE_SECRETS_REMOVED", "critical"},
+		{"gcp_private_key_id", `"private_key_id"\s*:\s*"[0-9a-fA-F]{8,}"`, "UNSAFE_SECRETS_REMOVED", "critical"},
+		{"azure_client_secret", `(?i)azure[_-]?client[_-]?secret\s*[=:]\s*['"]?([a-zA-Z0-9~_\-\.]{10,})['"]?`, "UNSAFE_SECRETS_REMOVED", "critical"},
+		{"azure_connection_string", `(?i)azure[_-]?connection[_-]?string\s*[=:]\s*['"]?([^'"\s]+)['"]?`, "UNSAFE_SECRETS_REMOVED", "critical"},
+		{"azure_sas_token", `sv=\d{4}-\d{2}-\d{2}[^&\s]*&[^&\s]*sig=`, "UNSAFE_SECRETS_REMOVED", "critical"},
+		{"azure_storage_key", `AccountKey=[A-Za-z0-9+/]{40,}={0,2}`, "UNSAFE_SECRETS_REMOVED", "critical"},
+
+		// OAuth and Authentication
+		{"oauth_token", `(?i)oauth[_-]?token\s*[=:]\s*['"]?([a-zA-Z0-9_-]{20,})['"]?`, "UNSAFE_SECRETS_REMOVED", "high"},
+		{"refresh_token", `(?i)refresh[_-]?token\s*[=:]\s*['"]?([a-zA-Z0-9_-]{20,})['"]?`, "UNSAFE_SECRETS_REMOVED", "high"},
+		{"id_token", `(?i)id[_-]?token\s*[=:]\s*['"]?([a-zA-Z0-9_-]{20,})['"]?`, "UNSAFE_SECRETS_REMOVED", "high"},
+
+		// Payment and Financial
 		{"stripe_key", `sk_live_[0-9a-zA-Z]{24}`, "UNSAFE_SECRETS_REMOVED", "critical"},
-		{"database_url", `(?i)(mongodb|mysql|postgres|redis)://[^\s'"]*`, "UNSAFE_SECRETS_REMOVED", "high"},
+		{"stripe_secret", `sk_test_[0-9a-zA-Z]{24}`, "UNSAFE_SECRETS_REMOVED", "critical"},
+		{"paypal_bearer", `(?i)paypal[_-]?bearer[_-]?token\s*[=:]\s*['"]?(A21[A-Za-z0-9_-]{500,})['"]?`, "UNSAFE_SECRETS_REMOVED", "critical"},
+		{"square_access_token", `(?i)square[_-]?access[_-]?token\s*[=:]\s*['"]?(sq0atp-[A-Za-z0-9_-]{22,})['"]?`, "UNSAFE_SECRETS_REMOVED", "critical"},
+
+		// Developer Platforms
+		{"github_token", `ghp_[a-zA-Z0-9]{36}`, "UNSAFE_SECRETS_REMOVED", "high"},
+		{"github_pat", `ghp_[a-zA-Z0-9]{36}`, "UNSAFE_SECRETS_REMOVED", "high"},
+		{"github_app_token", `gho_[a-zA-Z0-9]{36}`, "UNSAFE_SECRETS_REMOVED", "high"},
+		{"github_installation_token", `ghu_[a-zA-Z0-9]{36}`, "UNSAFE_SECRETS_REMOVED", "high"},
+		{"gitlab_token", `glpat-[a-zA-Z0-9\-]{20}`, "UNSAFE_SECRETS_REMOVED", "high"},
+		{"bitbucket_token", `(?i)bitbucket[_-]?oauth[_-]?secret\s*[=:]\s*['"]?([a-zA-Z0-9+/]{10,})['"]?`, "UNSAFE_SECRETS_REMOVED", "high"},
+		{"slack_token", `xox[baprs]-[0-9]{10,13}-[0-9]{10,13}-[a-zA-Z0-9]{24}`, "UNSAFE_SECRETS_REMOVED", "high"},
+		{"discord_token", `(?i)discord[_-]?bot[_-]?token\s*[=:]\s*['"]?(m[A-Za-z0-9_-]{23,})['"]?`, "UNSAFE_SECRETS_REMOVED", "high"},
+		{"twilio_api_key", `SK[a-f0-9]{32}`, "UNSAFE_SECRETS_REMOVED", "high"},
+		{"sendgrid_api_key", `(?i)sendgrid[_-]?api[_-]?key\s*[=:]\s*['"]?(SG\.[a-zA-Z0-9_-]{22,}\.[a-zA-Z0-9_-]{22,})['"]?`, "UNSAFE_SECRETS_REMOVED", "high"},
+
+		// Databases and Storage
+		{"database_url", `(?i)(mongodb|mysql|postgres|redis|cassandra|elasticsearch)://[^\s'"]*`, "UNSAFE_SECRETS_REMOVED", "high"},
+		{"connection_string", `(?i)(?:connection|string|conn)[_-]?(?:string|url)\s*[=:]\s*['"]?([^'"\s]{20,})['"]?`, "UNSAFE_SECRETS_REMOVED", "high"},
+		{"connection_string_with_secret", `(?i)(?:mongodb|mysql|postgres|redis|sqlserver)://[^:]+:[^@]+@[^\s'"]+`, "UNSAFE_SECRETS_REMOVED", "high"},
+		{"cosmosdb_connection", `(?i)cosmos[_-]?db[_-]?connection[_-]?string\s*[=:]\s*['"]?([^'"\s]+)['"]?`, "UNSAFE_SECRETS_REMOVED", "critical"},
+
+		// Passwords and Credentials
+		{"password", `(?i)(password|passwd|pwd)\s*[=:]\s*['"]?([^\s'"]{6,})['"]?`, "UNSAFE_SECRETS_REMOVED", "medium"},
+		{"admin_password", `(?i)(admin[_-]?password|root[_-]?password)\s*[=:]\s*['"]?([^\s'"]{6,})['"]?`, "UNSAFE_SECRETS_REMOVED", "high"},
+		{"database_password", `(?i)(db[_-]?password|database[_-]?passwd)\s*[=:]\s*['"]?([^\s'"]{6,})['"]?`, "UNSAFE_SECRETS_REMOVED", "high"},
+		{"ldap_password", `(?i)(ldap|ldaps)_?password\s*[=:]\s*['"]?([^\s'"]{6,})['"]?`, "UNSAFE_SECRETS_REMOVED", "high"},
+		{"smtp_password", `(?i)smtp[_-]?password\s*[=:]\s*['"]?([^\s'"]{6,})['"]?`, "UNSAFE_SECRETS_REMOVED", "medium"},
+		{"imap_password", `(?i)imap[_-]?password\s*[=:]\s*['"]?([^\s'"]{6,})['"]?`, "UNSAFE_SECRETS_REMOVED", "medium"},
+
+		// Private Keys (Direct Format)
+		{"rsa_private_key", `-----BEGIN RSA PRIVATE KEY-----`, "UNSAFE_SECRETS_REMOVED", "critical"},
+		{"dsa_private_key", `-----BEGIN DSA PRIVATE KEY-----`, "UNSAFE_SECRETS_REMOVED", "critical"},
+		{"ec_private_key", `-----BEGIN EC PRIVATE KEY-----`, "UNSAFE_SECRETS_REMOVED", "critical"},
+		{"openssh_private_key", `-----BEGIN OPENSSH PRIVATE KEY-----`, "UNSAFE_SECRETS_REMOVED", "critical"},
+
+		// JWT (Additional patterns)
+		{"jws_signature", `^[A-Za-z0-9_-]+\.+[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$`, "UNSAFE_SECRETS_REMOVED", "high"},
+
+		// Encryption and Cryptographic Materials
+		{"aes_key", `(?i)aes[_-]?(?:key|256|128)\s*[=:]\s*['"]?([a-f0-9]{32,64})['"]?`, "UNSAFE_SECRETS_REMOVED", "critical"},
+		{"hmac_secret", `(?i)hmac[_-]?secret\s*[=:]\s*['"]?([a-zA-Z0-9]{16,})['"]?`, "UNSAFE_SECRETS_REMOVED", "critical"},
+		{"nonce_value", `(?i)nonce[_-]?value\s*[=:]\s*['"]?([a-zA-Z0-9+/]{10,})['"]?`, "UNSAFE_SECRETS_REMOVED", "medium"},
+		{"iv_value", `(?i)(?:iv|initialization[_-]?vector)\s*[=:]\s*['"]?([a-f0-9]{16,})['"]?`, "UNSAFE_SECRETS_REMOVED", "medium"},
+
+		// Cloud Provider Tokens
+		{"digitalocean_token", `(?i)digitalocean[_-]?token\s*[=:]\s*['"]?(v[a-f0-9]{64})['"]?`, "UNSAFE_SECRETS_REMOVED", "high"},
+		{"linode_token", `(?i)linode[_-]?token\s*[=:]\s*['"]?([a-f0-9]{40})['"]?`, "UNSAFE_SECRETS_REMOVED", "high"},
+		{"oracle_cloud_key", `(?i)oracle[_-]?cloud[_-]?api[_-]?key\s*[=:]\s*['"]?([a-zA-Z0-9+/]{50,})['"]?`, "UNSAFE_SECRETS_REMOVED", "critical"},
+
+		// Hardware and Device
+		{"imei_number", `\b(?:\d{15}|[\d\*-]{15,20})\b`, "UNSAFE_SECRETS_REMOVED", "medium"},
+
+		// Token-like patterns (generic)
+		{"token_pattern", `(?i)(?:token|auth)[_-]?(?:key|secret|value)\s*[=:]\s*['"]?([a-zA-Z0-9_-]{16,})['"]?`, "UNSAFE_SECRETS_REMOVED", "high"},
 	}
 
 	for _, pattern := range patterns {
@@ -413,9 +500,27 @@ func collapseSpacingVariant(s string) string {
 	return s
 }
 
+// normalizeLeet maps common leet-speak substitutions to their ASCII equivalents
+// so that leet-obfuscated injection phrases are still caught by existing patterns.
+var leetReplacer = strings.NewReplacer(
+	"0", "o",
+	"1", "i",
+	"3", "e",
+	"4", "a",
+	"@", "a",
+	"$", "s",
+	"5", "s",
+	"7", "t",
+)
+
+func normalizeLeet(s string) string {
+	return leetReplacer.Replace(s)
+}
+
 // detectPromptInjection detects various prompt injection attack patterns
 func (m *Manager) detectPromptInjection(result *SanitizationResult) *SanitizationResult {
 	content := collapseSpacingVariant(result.Sanitized)
+	leet := normalizeLeet(content)
 
 	// Comprehensive prompt injection patterns
 	patterns := []struct {
@@ -624,7 +729,9 @@ func (m *Manager) detectPromptInjection(result *SanitizationResult) *Sanitizatio
 		re := regexp.MustCompile(pattern.regex)
 		matches := re.FindAllStringIndex(content, -1)
 
+		seenPositions := make(map[int]bool)
 		for _, match := range matches {
+			seenPositions[match[0]] = true
 			detection := Detection{
 				Type:        "prompt_injection_" + pattern.name,
 				Pattern:     pattern.name,
@@ -633,6 +740,22 @@ func (m *Manager) detectPromptInjection(result *SanitizationResult) *Sanitizatio
 				Severity:    pattern.severity,
 			}
 			result.Detections = append(result.Detections, detection)
+		}
+
+		// Also run against leet-normalised content; record new hit positions only.
+		leetMatches := re.FindAllStringIndex(leet, -1)
+		for _, match := range leetMatches {
+			if !seenPositions[match[0]] {
+				seenPositions[match[0]] = true
+				detection := Detection{
+					Type:        "prompt_injection_" + pattern.name,
+					Pattern:     pattern.name,
+					Replacement: pattern.replacement,
+					Position:    match[0],
+					Severity:    pattern.severity,
+				}
+				result.Detections = append(result.Detections, detection)
+			}
 		}
 
 		content = re.ReplaceAllString(content, pattern.replacement)
@@ -664,6 +787,45 @@ func (m *Manager) detectPromptInjection(result *SanitizationResult) *Sanitizatio
 	content = m.detectAdvancedPromptInjection(content, result)
 
 	result.Sanitized = content
+	return result
+}
+
+// detectBase64Injection scans for base64-encoded blobs and checks their decoded
+// content for known injection keywords. A detection is recorded if any keyword
+// is found; the encoded blob is left in the sanitized output so that the
+// subsequent detectPromptInjection pass can also act on it.
+func (m *Manager) detectBase64Injection(result *SanitizationResult) *SanitizationResult {
+	injectionKeywords := []string{
+		"ignore all previous",
+		"system prompt",
+		"instructions verbatim",
+		"you are now",
+		"act as",
+	}
+
+	matches := m.base64Re.FindAllString(result.Sanitized, -1)
+	for _, blob := range matches {
+		decoded, err := base64.StdEncoding.DecodeString(blob)
+		if err != nil {
+			continue
+		}
+		lower := strings.ToLower(string(decoded))
+		for _, kw := range injectionKeywords {
+			if strings.Contains(lower, kw) {
+				m.logger.Warn("Base64-encoded prompt injection detected", "keyword", kw, "blob_len", len(blob))
+				detection := Detection{
+					Type:        "base64_encoded_injection",
+					Pattern:     blob,
+					Replacement: "UNSAFE_ENCODED_INJECTION_REMOVED",
+					Position:    strings.Index(result.Sanitized, blob),
+					Severity:    "critical",
+				}
+				result.Detections = append(result.Detections, detection)
+				break // one detection per blob is enough
+			}
+		}
+	}
+
 	return result
 }
 
@@ -856,6 +1018,9 @@ func (m *Manager) sanitizeUnicodeSequences(content string) string {
 func (m *Manager) initializePatterns() {
 	// Compile internal patterns (already defined in detectPromptInjection, detectCommandInjection, etc.)
 	// These are compiled at call time in the existing code - keep that pattern for now
+
+	// Pre-compile base64 blob scanner used by detectBase64Injection (ISC-23)
+	m.base64Re = regexp.MustCompile(`[A-Za-z0-9+/]{20,}={0,2}`)
 
 	// Compile IOC patterns from ioc_patterns.go
 	m.iocPatterns = GetIOCPatterns()

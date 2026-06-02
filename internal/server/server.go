@@ -199,14 +199,20 @@ func (s *MCPFirewall) setupRouter() {
 	}
 
 	// Authentication endpoints
-	auth := s.router.Group("/auth")
+	authGroup := s.router.Group("/auth")
 	{
-		auth.POST("/login", s.auth.Login)
-		auth.POST("/refresh", s.auth.RefreshToken)
-		auth.POST("/logout", s.auth.Logout)
+		authGroup.POST("/login", s.auth.Login)
+		authGroup.POST("/refresh", s.auth.RefreshToken)
+		authGroup.POST("/logout", s.auth.Logout)
 		if s.config.Auth.OAuth.Enabled {
-			auth.GET("/oauth/callback", s.auth.OAuthCallback)
-			auth.GET("/oauth/login", s.auth.OAuthLogin)
+			authGroup.GET("/oauth/callback", s.auth.OAuthCallback)
+			authGroup.GET("/oauth/login", s.auth.OAuthLogin)
+		}
+		if s.auth.WebAuthn != nil {
+			authGroup.POST("/webauthn/register/begin", s.auth.WebAuthn.RegisterBegin)
+			authGroup.POST("/webauthn/register/finish", s.auth.WebAuthn.RegisterFinish)
+			authGroup.POST("/webauthn/login/begin", s.auth.WebAuthn.LoginBegin)
+			authGroup.POST("/webauthn/login/finish", s.auth.WebAuthn.LoginFinish)
 		}
 	}
 }
