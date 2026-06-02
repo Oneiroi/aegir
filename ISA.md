@@ -53,9 +53,17 @@ Aegir is the reference implementation for MCP security. Any operator can drop it
 
 ## Goal
 
-Complete the remaining open work in priority order: (1) rename probe test functions to match ISA specifications (ISC-1, ISC-2, ISC-3); (2) implement WebAuthn/FIDO2 MFA enforcement — registration and authentication ceremonies plus credential persistence — using `github.com/go-webauthn/webauthn` (ISC-4 through ISC-6.1); (3) replace the sequential multi-regex IOC scan with an Aho-Corasick trie for throughput (M012, ISC-124 through ISC-137); (4) implement the LLM judge inference layer with MCP-native async hold-and-decide flow (M009, ISC-29 through ISC-42); (5) complete M007 through M011 security hardening features — such that `go test ./...` exits 0, ATLAS coverage exceeds 75%, and Aegir ships with a working demo pipeline and machine-readable scope boundary.
+Complete the remaining open work in priority order: (1) M008 pattern hot-reload via SIGHUP (ISC-26); (2) verify `go test ./...` and demo pipeline (ISC-82, ISC-83, ISC-84); (3) replace the sequential multi-regex IOC scan with an Aho-Corasick trie for throughput (M012, ISC-124 through ISC-137); (4) implement the LLM judge inference layer with MCP-native async hold-and-decide flow (M009, ISC-29 through ISC-42); (5) complete remaining M010/M011 security hardening — such that ATLAS coverage exceeds 75% and Aegir ships with a working demo pipeline.
 
-**Build priority for handoff:** probe-name fixes → MFA WebAuthn → M012 Aho-Corasick layer → SCOPE.md → M007 secret patterns (parallelizable) → M008 encoded payloads → LLM judge core → LLM judge async hold → M010/M011 (many parallelizable).
+**Session 2026-06-02 completed:** probe renames (ISC-1/2/3), WebAuthn MFA (ISC-4/5/6/6.1), SCOPE.md (ISC-13), rate-limit identity keying (ISC-14), model extraction detection (ISC-15), Azure/GCP/Slack secrets (ISC-17/18/19), base64+leet+extraction detection (ISC-23/24/25). HEAD: `a9f2bae`. `go test ./...` green.
+
+**Build priority for next agent handoff:**
+1. ISC-26: Pattern hot-reload via SIGHUP — `internal/sanitizer/manager.go` + `internal/server/server.go` SIGHUP handler; new patterns active within 5s, zero dropped connections
+2. ISC-82/83/84: `just build`, `go test ./...`, `./bin/demo-flow-test.sh` — confirm all exit 0
+3. M012 Aho-Corasick (ISC-124 through ISC-137): `internal/detection/` package; Detector interface + AhoCorasick impl + word-token normaliser; replace iocCompiled loop in detectPromptInjection; no new external deps
+4. LLM judge core (ISC-29, ISC-30, ISC-31, ISC-37, ISC-38, ISC-39, ISC-40): `internal/judge/` package; Ollama default, API opt-in; SUSPICIOUS-only invocation gate; timeout → BLOCK
+5. LLM judge async hold (ISC-32 through ISC-36, ISC-93): MCP in-progress notification; buffer upstream response; client-facing pass-or-terminate
+6. M010/M011 (ISC-105 through ISC-123): many parallelizable — tool description scanning, schema fingerprinting, replay protection, OAuth scope audit; see Features table for dependency graph
 
 ## Criteria
 
@@ -506,6 +514,8 @@ Complete the remaining open work in priority order: (1) rename probe test functi
 
 - 2026-06-01: MFA mechanism changed from TOTP to WebAuthn/FIDO2. Rationale: TOTP shared secrets are phishable and exfiltratable; WebAuthn is phishing-resistant (origin-bound public-key challenge/response), strengthens AML.T0012 (Valid Accounts) coverage, and is the correct posture for a security-gateway product. Architectural impact: MFA is no longer a single `MFACode` field validated in `Login()` — it is two ceremonies (registration begin/finish, authentication begin/finish) with server-side credential persistence (credential ID, public key, sign counter, AAGUID) and a single-use, time-bounded challenge store. Sign-counter regression is used for cloned-authenticator detection. Dependency: `github.com/pquerna/otp` is NOT introduced; `github.com/go-webauthn/webauthn` is the new external dependency — **requires explicit approval per Constraints (no new external deps without approval); flagged for handoff.** ISC-4 through ISC-6 rewritten in place (ID stability preserved); ISC-6.1 added for challenge replay/expiry. Supersedes the TOTP plan recorded in the 2026-06-01 code-audit decision above.
 
+- 2026-06-02: Session audit and implementation (HEAD `a9f2bae`). Found broken TOTP working-tree changes (missing `TOTPManager` type + unresolved `pquerna/otp` go.sum) — reverted to HEAD and implemented WebAuthn as planned. Also found oracle_cloud_key regex with `{2000,}` causing a panic in Go's RE2 engine — fixed to `{50,}`. Four parallel background agents implemented: (1) sanitizer IOC pattern enhancements (ISC-25 extraction, ISC-18 GCP JSON patterns), (2) M008 transforms (ISC-17 Azure SAS, ISC-23 base64 decode-scan, ISC-24 leet normalisation), (3) SCOPE.md + aegir-scope.json (ISC-13), (4) WebAuthn FIDO2 ceremonies (ISC-4/5/6/6.1). dnsResolver made injectable in secureDialContext to enable `TestDNSRebindingSSRF` without real DNS. `go-webauthn/webauthn v0.17.4` added to go.mod. ISA progress: 10 → 26/139. All packages pass `go test ./...`.
+
 ## Changelog
 
 - 2026-05-13 | conjectured: 8 sanitizer test failures are straightforward pattern additions
@@ -537,6 +547,11 @@ Complete the remaining open work in priority order: (1) rename probe test functi
   refuted_by: Go's RE2 regexp is indeed slower than trie-based matching, but the gain is from the multi-pattern algorithm (Aho-Corasick), not ML-based semantic search — embedding models are 5-50ms per request and would violate the <10ms p99 constraint
   learned: the correct interpretation of "tokenized detection" for Aegir is replacing N sequential `regexp.Match()` calls with a single O(n) Aho-Corasick trie walk over normalised tokens; semantic/embedding approaches belong on the SUSPICIOUS path only (before the LLM judge), not the fast path
   criterion_now: ISC-124 through ISC-137 (M012) specify an Aho-Corasick trie in `internal/detection/`, primary gate is latency benchmark ISC-128/129
+
+- 2026-06-02 | conjectured: working-tree TOTP work and session-analyzer changes were complete and ready to build on
+  refuted_by: auth/manager.go referenced undefined `TOTPManager` + `createTOTPManager` (never written); oracle_cloud_key regex used `{2000,}` which Go RE2 rejects; both caused `go test ./...` to fail before any ISC work could begin
+  learned: always run `go test ./...` at session start before reading ISC state from ISA — broken build invalidates all ISA "done" claims; working-tree changes are not committed and may be partially written
+  criterion_now: ISC-82 (`just build` exits 0) and ISC-83 (`go test ./...` exits 0) are not just final gates but required preconditions for any session that builds on prior working-tree state
 
 ## Verification
 
