@@ -439,10 +439,10 @@ func (m *Manager) OAuthLogin(c *gin.Context) {
 
 	m.logger.Info("OAuth login initiated", "provider", provider, "state", state, "ip", c.ClientIP())
 
-	c.JSON(http.StatusOK, gin.H{
-		"auth_url": authURL,
-		"state":    state,
-	})
+	// Redirect the client to the provider's authorisation endpoint.
+	// Include the state parameter for CSRF protection.
+	redirectTarget := fmt.Sprintf("%s?state=%s&response_type=code", authURL, state)
+	c.Redirect(http.StatusFound, redirectTarget)
 }
 
 // OAuthCallback handles OAuth callback
