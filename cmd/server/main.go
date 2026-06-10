@@ -203,21 +203,29 @@ func runHTTPMode(cfg *config.Config, transport string) {
 		}
 	}()
 
-	// Wait for interrupt signal to gracefully shutdown the server
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-	log.Println("Shutting down server...")
+	// Signal loop: SIGHUP hot-reloads detection patterns (ISC-26/134);
+	// SIGINT/SIGTERM trigger graceful shutdown.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
-	// Graceful shutdown with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatalf("Server forced to shutdown: %v", err)
+	for {
+		sig := <-sigCh
+		switch sig {
+		case syscall.SIGHUP:
+			log.Println("SIGHUP received — hot-reloading detection patterns")
+			mcpServer.GetSanitizer().Reload()
+			log.Println("Detection patterns reloaded")
+		case syscall.SIGINT, syscall.SIGTERM:
+			log.Println("Shutting down server...")
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := srv.Shutdown(ctx); err != nil {
+				log.Fatalf("Server forced to shutdown: %v", err)
+			}
+			log.Println("Server exited")
+			return
+		}
 	}
-
-	log.Println("Server exited")
 }
 
 func createTLSConfig(cfg *config.Config) *tls.Config {

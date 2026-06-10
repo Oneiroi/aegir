@@ -5,9 +5,11 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aegishjalmur/aegir/internal/config"
+	"github.com/aegishjalmur/aegir/internal/detection"
 	"github.com/aegishjalmur/aegir/internal/logging"
 )
 
@@ -24,10 +26,19 @@ type Manager struct {
 	xssPatterns         []*regexp.Regexp
 	sqlInjectionPatterns []*regexp.Regexp
 
-	// Compiled IOC patterns - populated at startup
-	iocPatterns    []IOCPattern // Raw patterns (with original ID, type, severity)
-	iocCompiled    []*regexp.Regexp
-	iocByName      map[string]*regexp.Regexp
+	// iocPatterns and iocCompiled hold the full IOC pattern set from ioc_patterns.go
+	// (template injection, LDAP, NoSQL, SSRF, path traversal, etc.). These cover
+	// literal pattern matching; the trie below adds evasion-resistant detection.
+	iocPatterns []IOCPattern
+	iocCompiled []*regexp.Regexp
+
+	// mu guards detector for hot-reload safety (ISC-26/134).
+	mu sync.RWMutex
+
+	// detector is the Aho-Corasick trie (ISC-131) that supplements iocCompiled with
+	// evasion-resistant detection (leet, spacing, unicode normalization). Built once
+	// in initializePatterns() and swapped atomically by Reload() on SIGHUP.
+	detector *detection.AhoCorasickDetector
 
 	// base64Re is used by detectBase64Injection for pre-scanning base64 blobs
 	base64Re *regexp.Regexp
@@ -761,9 +772,9 @@ func (m *Manager) detectPromptInjection(result *SanitizationResult) *Sanitizatio
 		content = re.ReplaceAllString(content, pattern.replacement)
 	}
 
-	// Apply compiled IOC patterns (from ioc_patterns.go)
+	// Apply compiled IOC patterns (template injection, LDAP, NoSQL, SSRF, path traversal, etc.)
 	for i, compiled := range m.iocCompiled {
-		if i >= len(m.iocPatterns) {
+		if compiled == nil || i >= len(m.iocPatterns) {
 			continue
 		}
 		ioc := m.iocPatterns[i]
@@ -779,8 +790,27 @@ func (m *Manager) detectPromptInjection(result *SanitizationResult) *Sanitizatio
 			}
 			result.Detections = append(result.Detections, detection)
 		}
-
 		content = compiled.ReplaceAllString(content, "UNSAFE_IOC_PATTERN_REMOVED")
+	}
+
+	// Aho-Corasick trie supplements the iocCompiled loop with evasion-resistant
+	// detection (leet, spacing, unicode normalization). Catches patterns the IOC
+	// regexes miss (ISC-131).
+	m.mu.RLock()
+	det := m.detector
+	m.mu.RUnlock()
+	if det != nil {
+		hits := det.Match(content)
+		for _, hit := range hits {
+			result.Detections = append(result.Detections, Detection{
+				Type:     "prompt_injection_ioc_" + hit.PatternID,
+				Pattern:  hit.PatternID,
+				Severity: hit.Severity,
+			})
+		}
+		if len(hits) > 0 {
+			content = "UNSAFE_IOC_PATTERN_REMOVED"
+		}
 	}
 
 	// Additional context-aware detection
@@ -1022,20 +1052,33 @@ func (m *Manager) initializePatterns() {
 	// Pre-compile base64 blob scanner used by detectBase64Injection (ISC-23)
 	m.base64Re = regexp.MustCompile(`[A-Za-z0-9+/]{20,}={0,2}`)
 
-	// Compile IOC patterns from ioc_patterns.go
+	// Compile full IOC pattern set (template injection, LDAP, NoSQL, SSRF, etc.).
 	m.iocPatterns = GetIOCPatterns()
 	m.iocCompiled = make([]*regexp.Regexp, 0, len(m.iocPatterns))
-	m.iocByName = make(map[string]*regexp.Regexp)
-
 	for _, ioc := range m.iocPatterns {
 		compiled, err := regexp.Compile(ioc.Pattern)
 		if err != nil {
-			m.logger.Warn("Failed to compile IOC pattern", "pattern_id", ioc.ID, "error", err)
+			m.logger.Warn("Failed to compile IOC pattern", "id", ioc.ID, "error", err)
+			m.iocCompiled = append(m.iocCompiled, nil)
 			continue
 		}
 		m.iocCompiled = append(m.iocCompiled, compiled)
-		m.iocByName[ioc.ID] = compiled
 	}
-
 	m.logger.Info("Compiled IOC patterns", "count", len(m.iocCompiled))
+
+	// Build the Aho-Corasick detection trie (ISC-131) for evasion-resistant coverage
+	// on top of the regex layer (leet, spacing, unicode normalization).
+	m.detector = detection.New()
+	m.logger.Info("Aho-Corasick detector initialised")
+}
+
+// Reload hot-reloads detection patterns without dropping connections (ISC-26/134).
+// Called on SIGHUP by the server signal handler.
+func (m *Manager) Reload() {
+	m.logger.Info("SIGHUP received — hot-reloading detection patterns")
+	newDetector := detection.New()
+	m.mu.Lock()
+	m.detector = newDetector
+	m.mu.Unlock()
+	m.logger.Info("Detection patterns hot-reloaded")
 }
