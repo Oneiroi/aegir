@@ -3,7 +3,10 @@ package upstream
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/rand"
@@ -27,6 +30,22 @@ type hostResolver interface {
 // dnsResolver is the active hostResolver. Tests replace this to inject controlled
 // DNS responses (e.g., a hostname that "rebinds" to a restricted IP).
 var dnsResolver hostResolver = net.DefaultResolver
+
+// UpstreamTLSConfig holds mTLS and certificate-pinning settings that are
+// applied manager-wide (across all upstream services).  These are separate
+// from the per-service config.UpstreamTLS fields so that the shared
+// config.go file does not need to be modified.
+type UpstreamTLSConfig struct {
+	// CertPin is the expected SHA-256 fingerprint (lowercase hex, no colons) of
+	// the upstream server's leaf certificate.  When non-empty every outbound TLS
+	// handshake verifies this value; a mismatch causes an immediate rejection.
+	CertPin string
+
+	// ClientCert and ClientKey are PEM-encoded file paths for the client
+	// certificate used in mTLS.  Both must be set together or not at all.
+	ClientCert string
+	ClientKey  string
+}
 
 // secureDialContext is a net.Dialer-compatible DialContext that defends against
 // DNS rebinding (TOCTOU) attacks by resolving the destination host once,
@@ -116,6 +135,8 @@ type Manager struct {
 	httpClient     *http.Client
 	currentIndex   int
 	indexMutex     sync.Mutex
+	tlsCfg         UpstreamTLSConfig
+	tlsCfgMu       sync.RWMutex
 }
 
 // MCPRequest represents a request to forward to upstream services
@@ -177,6 +198,40 @@ func NewManager(config *config.Upstream, logger *logging.Logger) *Manager {
 	}
 
 	return m
+}
+
+// ConfigureTLS sets or replaces the manager-wide mTLS / cert-pinning config.
+// It validates that the provided client certificate files can actually be
+// loaded (when specified) and returns an error without updating state if
+// validation fails.  It is safe to call concurrently with ForwardRequest.
+func (m *Manager) ConfigureTLS(tlsCfg UpstreamTLSConfig) error {
+	// Validate client-cert pair up front so callers get an immediate,
+	// actionable error rather than a silent failure at connection time.
+	if (tlsCfg.ClientCert != "") != (tlsCfg.ClientKey != "") {
+		return fmt.Errorf("upstream mTLS: ClientCert and ClientKey must both be set or both be empty")
+	}
+	if tlsCfg.ClientCert != "" {
+		if _, err := tls.LoadX509KeyPair(tlsCfg.ClientCert, tlsCfg.ClientKey); err != nil {
+			return fmt.Errorf("upstream mTLS: failed to load client certificate: %w", err)
+		}
+	}
+
+	// Normalise the pin to lowercase so comparisons are case-insensitive.
+	if tlsCfg.CertPin != "" {
+		tlsCfg.CertPin = strings.ToLower(tlsCfg.CertPin)
+		// Sanity-check: a SHA-256 hex digest is exactly 64 characters.
+		if len(tlsCfg.CertPin) != 64 {
+			return fmt.Errorf("upstream mTLS: CertPin must be a 64-character hex-encoded SHA-256 digest, got %d chars", len(tlsCfg.CertPin))
+		}
+		if _, err := hex.DecodeString(tlsCfg.CertPin); err != nil {
+			return fmt.Errorf("upstream mTLS: CertPin is not valid hex: %w", err)
+		}
+	}
+
+	m.tlsCfgMu.Lock()
+	m.tlsCfg = tlsCfg
+	m.tlsCfgMu.Unlock()
+	return nil
 }
 
 // ForwardRequest forwards an MCP request to an appropriate upstream service
@@ -393,22 +448,75 @@ func (m *Manager) createHTTPClient(service *ServiceState) *http.Client {
 		DialContext: secureDialContext,
 	}
 
-	if service.Service.TLS.Enabled {
+	// Read manager-wide TLS config under the read-lock so that concurrent
+	// ConfigureTLS calls cannot produce a torn read.
+	m.tlsCfgMu.RLock()
+	managerTLS := m.tlsCfg
+	m.tlsCfgMu.RUnlock()
+
+	// TLS is needed if the service requests it OR if the manager has
+	// cert-pinning / mTLS configured.
+	needTLS := service.Service.TLS.Enabled ||
+		managerTLS.CertPin != "" ||
+		managerTLS.ClientCert != ""
+
+	if needTLS {
 		tlsConfig := &tls.Config{
-			InsecureSkipVerify: service.Service.TLS.SkipVerify,
+			InsecureSkipVerify: service.Service.TLS.SkipVerify, //nolint:gosec // controlled by explicit operator config
 		}
 
 		if service.Service.TLS.ServerName != "" {
 			tlsConfig.ServerName = service.Service.TLS.ServerName
 		}
 
-		// Add client certificates if configured
+		// Per-service client certificates (from config.UpstreamTLS).
 		if service.Service.TLS.ClientCertFile != "" && service.Service.TLS.ClientKeyFile != "" {
 			cert, err := tls.LoadX509KeyPair(service.Service.TLS.ClientCertFile, service.Service.TLS.ClientKeyFile)
 			if err != nil {
 				m.logger.Error("Failed to load client certificates", "error", err)
 			} else {
 				tlsConfig.Certificates = []tls.Certificate{cert}
+			}
+		}
+
+		// Manager-wide mTLS client certificate (from UpstreamTLSConfig).
+		// Overrides the per-service cert when both are provided.
+		if managerTLS.ClientCert != "" && managerTLS.ClientKey != "" {
+			cert, err := tls.LoadX509KeyPair(managerTLS.ClientCert, managerTLS.ClientKey)
+			if err != nil {
+				m.logger.Error("Failed to load manager-level mTLS client certificate", "error", err)
+			} else {
+				tlsConfig.Certificates = []tls.Certificate{cert}
+			}
+		}
+
+		// SHA-256 certificate pinning.
+		// VerifyPeerCertificate is called after the normal chain verification
+		// (or in parallel when InsecureSkipVerify is true).  We pin the leaf
+		// certificate — rawCerts[0] — by its DER SHA-256 digest.
+		if managerTLS.CertPin != "" {
+			expectedPin := managerTLS.CertPin
+			logger := m.logger
+			serviceName := service.Service.Name
+
+			tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+				if len(rawCerts) == 0 {
+					return fmt.Errorf("upstream_cert_mismatch: no certificates presented by server")
+				}
+				// Compute SHA-256 of the leaf certificate DER bytes.
+				digest := sha256.Sum256(rawCerts[0])
+				actual := hex.EncodeToString(digest[:])
+
+				if actual != expectedPin {
+					logger.Error("upstream_cert_mismatch",
+						"service", serviceName,
+						"expected_pin", expectedPin,
+						"actual_pin", actual,
+					)
+					return fmt.Errorf("upstream_cert_mismatch: certificate pin mismatch for service %q: expected %s got %s",
+						serviceName, expectedPin, actual)
+				}
+				return nil
 			}
 		}
 
