@@ -18,6 +18,7 @@ type ConversationalThreatAnalyzer struct {
 	logger         *logging.Logger
 	config         AnalyzerConfig
 	attackPatterns map[string]*AttackPattern
+	seqPatterns    []SequencePattern
 	done           chan struct{}
 }
 
@@ -45,69 +46,103 @@ type ModelExtractionReport struct {
 
 // SessionContext tracks conversation state and threat indicators
 type SessionContext struct {
-	SessionID      string                 `json:"session_id"`
-	UserID         string                 `json:"user_id"`
-	StartTime      time.Time             `json:"start_time"`
-	LastActivity   time.Time             `json:"last_activity"`
-	MessageCount   int                   `json:"message_count"`
-	ThreatScore    float64               `json:"threat_score"`
-	RoleEscalation int                   `json:"role_escalation_attempts"`
-	JailbreakScore float64               `json:"jailbreak_score"`
-	History        []MessageContext      `json:"history"`
-	Flags          map[string]int        `json:"flags"`
-	Risk           string                `json:"risk_level"`
-	SlidingWindow  *SlidingWindowStats   `json:"sliding_window"`
+	SessionID      string               `json:"session_id"`
+	UserID         string               `json:"user_id"`
+	StartTime      time.Time            `json:"start_time"`
+	LastActivity   time.Time            `json:"last_activity"`
+	MessageCount   int                  `json:"message_count"`
+	ThreatScore    float64              `json:"threat_score"`
+	RoleEscalation int                  `json:"role_escalation_attempts"`
+	JailbreakScore float64              `json:"jailbreak_score"`
+	History        []MessageContext     `json:"history"`
+	Flags          map[string]int       `json:"flags"`
+	Risk           string               `json:"risk_level"`
+	SlidingWindow  *SlidingWindowStats  `json:"sliding_window"`
+
+	// ISC-16: rolling EWMA anomaly score across messages
+	AnomalyEWMA float64 `json:"anomaly_ewma"`
+
+	// ISC-112: ordered tool-call events for sequence detection
+	ToolCalls []ToolCallEvent `json:"tool_calls"`
 }
 
 // MessageContext represents a single message in conversation
 type MessageContext struct {
-	Timestamp    time.Time `json:"timestamp"`
-	Content      string    `json:"content"`
-	ThreatScore  float64   `json:"threat_score"`
-	Detections   []string  `json:"detections"`
-	Role         string    `json:"role,omitempty"`
-	Intent       string    `json:"intent,omitempty"`
+	Timestamp   time.Time `json:"timestamp"`
+	Content     string    `json:"content"`
+	ThreatScore float64   `json:"threat_score"`
+	Detections  []string  `json:"detections"`
+	Role        string    `json:"role,omitempty"`
+	Intent      string    `json:"intent,omitempty"`
 }
 
 // AttackPattern defines multi-turn attack signatures
 type AttackPattern struct {
-	Name           string        `json:"name"`
-	Stages         []string      `json:"stages"`
-	MinMessages    int           `json:"min_messages"`
-	MaxTimespan    time.Duration `json:"max_timespan"`
-	ThreatLevel    string        `json:"threat_level"`
-	Indicators     []string      `json:"indicators"`
+	Name        string        `json:"name"`
+	Stages      []string      `json:"stages"`
+	MinMessages int           `json:"min_messages"`
+	MaxTimespan time.Duration `json:"max_timespan"`
+	ThreatLevel string        `json:"threat_level"`
+	Indicators  []string      `json:"indicators"`
+}
+
+// ToolCallEvent records a single tool-call name with its timestamp (ISC-112)
+type ToolCallEvent struct {
+	Name      string    `json:"name"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+// SequencePattern defines a high-risk ordered tool-call sequence (ISC-112)
+// Steps may be exact names or prefix-glob patterns ending in "*" (e.g. "send_*")
+type SequencePattern struct {
+	Steps  []string      `json:"steps"`
+	Window time.Duration `json:"window"`
 }
 
 // AnalyzerConfig configures the conversational threat analyzer
 type AnalyzerConfig struct {
-	MaxSessionAge           time.Duration `json:"max_session_age"`
-	MaxHistorySize          int          `json:"max_history_size"`
-	ThreatThreshold         float64      `json:"threat_threshold"`
-	CleanupInterval         time.Duration `json:"cleanup_interval"`
-	JailbreakThreshold      float64      `json:"jailbreak_threshold"`
-	RoleEscalationLimit     int          `json:"role_escalation_limit"`
-	SlidingWindowSize       time.Duration `json:"sliding_window_size"`
-	RepetitionThreshold     int          `json:"repetition_threshold"`
-	UniformityThreshold     float64      `json:"uniformity_threshold"`
+	MaxSessionAge       time.Duration `json:"max_session_age"`
+	MaxHistorySize      int           `json:"max_history_size"`
+	ThreatThreshold     float64       `json:"threat_threshold"`
+	CleanupInterval     time.Duration `json:"cleanup_interval"`
+	JailbreakThreshold  float64       `json:"jailbreak_threshold"`
+	RoleEscalationLimit int           `json:"role_escalation_limit"`
+	SlidingWindowSize   time.Duration `json:"sliding_window_size"`
+	RepetitionThreshold int           `json:"repetition_threshold"`
+	UniformityThreshold float64       `json:"uniformity_threshold"`
+
+	// ISC-16: EWMA smoothing factor α ∈ (0,1] and block threshold
+	AnomalyEWMAAlpha      float64 `json:"anomaly_ewma_alpha"`
+	AnomalyBlockThreshold float64 `json:"anomaly_block_threshold"`
+
+	// ISC-112: sliding window for sequence detection
+	SequenceWindowSize time.Duration `json:"sequence_window_size"`
 }
 
 // ThreatAssessment contains the analysis result
 type ThreatAssessment struct {
-	SessionID           string            `json:"session_id"`
-	CurrentThreatScore  float64          `json:"current_threat_score"`
-	JailbreakRisk       float64          `json:"jailbreak_risk"`
-	ConversationRisk    string           `json:"conversation_risk"`
-	AttackPatterns      []string         `json:"detected_patterns"`
-	RecommendedAction   string           `json:"recommended_action"`
-	BlockConversation   bool             `json:"block_conversation"`
-	Reasoning          []string          `json:"reasoning"`
-	Indicators         map[string]int    `json:"indicators"`
+	SessionID          string         `json:"session_id"`
+	CurrentThreatScore float64        `json:"current_threat_score"`
+	JailbreakRisk      float64        `json:"jailbreak_risk"`
+	ConversationRisk   string         `json:"conversation_risk"`
+	AttackPatterns     []string       `json:"detected_patterns"`
+	RecommendedAction  string         `json:"recommended_action"`
+	BlockConversation  bool           `json:"block_conversation"`
+	Reasoning          []string       `json:"reasoning"`
+	Indicators         map[string]int `json:"indicators"`
 }
 
 // ThreatAnalyzer is the interface for session-level threat analysis.
 type ThreatAnalyzer interface {
 	AnalyzeMessage(sessionID, userID, content string) *ThreatAssessment
+}
+
+// defaultHighRiskSequences returns the built-in high-risk tool-call sequence patterns
+func defaultHighRiskSequences() []SequencePattern {
+	return []SequencePattern{
+		{Steps: []string{"list_credentials", "send_*"}, Window: 10 * time.Minute},
+		{Steps: []string{"read_file", "upload_*"}, Window: 10 * time.Minute},
+	}
 }
 
 // NewConversationalThreatAnalyzer creates a new analyzer
@@ -139,6 +174,17 @@ func NewConversationalThreatAnalyzer(config AnalyzerConfig, logger *logging.Logg
 	if config.UniformityThreshold <= 0 {
 		config.UniformityThreshold = 0.8
 	}
+	// ISC-16 defaults
+	if config.AnomalyEWMAAlpha <= 0 {
+		config.AnomalyEWMAAlpha = 0.4 // moderate responsiveness
+	}
+	if config.AnomalyBlockThreshold <= 0 {
+		config.AnomalyBlockThreshold = 0.70
+	}
+	// ISC-112 defaults
+	if config.SequenceWindowSize <= 0 {
+		config.SequenceWindowSize = 10 * time.Minute
+	}
 
 	analyzer := &ConversationalThreatAnalyzer{
 		sessions:       make(map[string]*SessionContext),
@@ -146,6 +192,7 @@ func NewConversationalThreatAnalyzer(config AnalyzerConfig, logger *logging.Logg
 		logger:         logger,
 		config:         config,
 		attackPatterns: make(map[string]*AttackPattern),
+		seqPatterns:    defaultHighRiskSequences(),
 		done:           make(chan struct{}),
 	}
 
@@ -179,8 +226,28 @@ func (cta *ConversationalThreatAnalyzer) AnalyzeMessage(sessionID, userID, conte
 		session.History = session.History[1:]
 	}
 
+	// ISC-112: extract tool-call name from content and record
+	if toolName := extractToolCallName(content); toolName != "" {
+		session.ToolCalls = append(session.ToolCalls, ToolCallEvent{
+			Name:      toolName,
+			Timestamp: msgCtx.Timestamp,
+		})
+	}
+
 	// Perform conversational analysis
 	assessment := cta.performConversationalAnalysis(session, msgCtx)
+
+	// ISC-16: update rolling EWMA with the current threat score, then check threshold
+	alpha := cta.config.AnomalyEWMAAlpha
+	session.AnomalyEWMA = alpha*assessment.CurrentThreatScore + (1-alpha)*session.AnomalyEWMA
+	if session.AnomalyEWMA >= cta.config.AnomalyBlockThreshold {
+		assessment.ConversationRisk = "critical"
+		assessment.BlockConversation = true
+		assessment.RecommendedAction = "BLOCK_SESSION"
+		assessment.Reasoning = append(assessment.Reasoning,
+			fmt.Sprintf("Session anomaly EWMA %.2f exceeds block threshold %.2f",
+				session.AnomalyEWMA, cta.config.AnomalyBlockThreshold))
+	}
 
 	// Update session threat score
 	session.ThreatScore = assessment.CurrentThreatScore
@@ -197,6 +264,7 @@ func (cta *ConversationalThreatAnalyzer) AnalyzeMessage(sessionID, userID, conte
 			"conversation_risk", assessment.ConversationRisk,
 			"attack_patterns", assessment.AttackPatterns,
 			"message_count", session.MessageCount,
+			"anomaly_ewma", session.AnomalyEWMA,
 		)
 	}
 
@@ -208,11 +276,11 @@ func (cta *ConversationalThreatAnalyzer) performConversationalAnalysis(session *
 	assessment := &ThreatAssessment{
 		SessionID:          session.SessionID,
 		CurrentThreatScore: 0.0,
-		JailbreakRisk:     0.0,
-		ConversationRisk:  "low",
-		AttackPatterns:    []string{},
-		Indicators:        make(map[string]int),
-		Reasoning:         []string{},
+		JailbreakRisk:      0.0,
+		ConversationRisk:   "low",
+		AttackPatterns:     []string{},
+		Indicators:         make(map[string]int),
+		Reasoning:          []string{},
 	}
 
 	// Analyze role escalation patterns
@@ -233,13 +301,124 @@ func (cta *ConversationalThreatAnalyzer) performConversationalAnalysis(session *
 	// Detect model extraction via sliding window repetition
 	cta.detectModelExtraction(session, assessment)
 
+	// ISC-112: detect high-risk tool-call sequences
+	cta.detectSequenceAnomalies(session, assessment)
+
 	// Calculate overall threat score
 	assessment.CurrentThreatScore = cta.calculateOverallThreat(session, assessment)
 
-	// Determine recommended action
+	// Determine recommended action (may be upgraded by EWMA check in AnalyzeMessage)
 	cta.determineRecommendedAction(assessment)
 
 	return assessment
+}
+
+// detectSequenceAnomalies checks the session's tool-call history for high-risk sequences (ISC-112)
+func (cta *ConversationalThreatAnalyzer) detectSequenceAnomalies(session *SessionContext, assessment *ThreatAssessment) {
+	if len(session.ToolCalls) < 2 {
+		return
+	}
+
+	now := time.Now()
+	windowSize := cta.config.SequenceWindowSize
+
+	// Prune events outside the window
+	recentCalls := make([]ToolCallEvent, 0, len(session.ToolCalls))
+	for _, ev := range session.ToolCalls {
+		if now.Sub(ev.Timestamp) <= windowSize {
+			recentCalls = append(recentCalls, ev)
+		}
+	}
+	session.ToolCalls = recentCalls
+
+	for _, pat := range cta.seqPatterns {
+		if cta.matchesSequencePattern(recentCalls, pat) {
+			if !containsString(assessment.AttackPatterns, "sequence_anomaly") {
+				assessment.AttackPatterns = append(assessment.AttackPatterns, "sequence_anomaly")
+				assessment.CurrentThreatScore += 0.4
+				assessment.Reasoning = append(assessment.Reasoning,
+					fmt.Sprintf("High-risk tool-call sequence detected: %s", strings.Join(pat.Steps, " → ")))
+				assessment.Indicators["sequence_anomaly"]++
+				cta.logger.Info("SECURITY: sequence_anomaly detected",
+					"session_id", session.SessionID,
+					"user_id", session.UserID,
+					"sequence", strings.Join(pat.Steps, " → "),
+				)
+			}
+		}
+	}
+}
+
+// matchesSequencePattern checks whether the events contain the pattern steps in order within the window
+func (cta *ConversationalThreatAnalyzer) matchesSequencePattern(events []ToolCallEvent, pat SequencePattern) bool {
+	if len(events) < len(pat.Steps) {
+		return false
+	}
+
+	// Find the first step, then look for subsequent steps occurring after it
+	stepIdx := 0
+	var firstTS time.Time
+	for _, ev := range events {
+		if matchesStep(ev.Name, pat.Steps[stepIdx]) {
+			if stepIdx == 0 {
+				firstTS = ev.Timestamp
+			}
+			stepIdx++
+			if stepIdx == len(pat.Steps) {
+				// All steps matched; verify total span fits in the pattern window
+				if pat.Window > 0 && ev.Timestamp.Sub(firstTS) > pat.Window {
+					return false
+				}
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// matchesStep matches a tool-call name against a step pattern (exact or prefix-glob with *)
+func matchesStep(name, pattern string) bool {
+	if strings.HasSuffix(pattern, "*") {
+		prefix := pattern[:len(pattern)-1]
+		return strings.HasPrefix(name, prefix)
+	}
+	return name == pattern
+}
+
+// extractToolCallName heuristically extracts a tool-call name from MCP message content.
+// It recognises JSON-shaped messages with a "method" or "name" field.
+func extractToolCallName(content string) string {
+	// Try "method": "<value>" or "name": "<value>" patterns
+	for _, key := range []string{`"method"`, `"name"`} {
+		idx := strings.Index(content, key)
+		if idx < 0 {
+			continue
+		}
+		rest := content[idx+len(key):]
+		// skip whitespace and colon
+		rest = strings.TrimLeft(rest, " \t\r\n:")
+		rest = strings.TrimLeft(rest, " \t\r\n")
+		if len(rest) == 0 || rest[0] != '"' {
+			continue
+		}
+		rest = rest[1:] // consume opening quote
+		end := strings.Index(rest, `"`)
+		if end < 0 {
+			continue
+		}
+		return rest[:end]
+	}
+	return ""
+}
+
+// containsString returns true if slice contains s
+func containsString(slice []string, s string) bool {
+	for _, v := range slice {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 // analyzeRoleEscalation detects attempts to gain privileged access
@@ -484,11 +663,11 @@ func (cta *ConversationalThreatAnalyzer) analyzeMessageContent(content string) M
 
 	// Basic threat indicators
 	threatPatterns := map[string]float64{
-		"ignore.*(previous|above|instruction)": 0.3,
+		"ignore.*(previous|above|instruction)":  0.3,
 		"you.*(are|must|will).*(now|admin|dev)": 0.4,
-		"bypass|override|disable": 0.3,
-		"jailbreak|dan|unrestricted": 0.5,
-		"system.*(override|mode|access)": 0.4,
+		"bypass|override|disable":               0.3,
+		"jailbreak|dan|unrestricted":            0.5,
+		"system.*(override|mode|access)":        0.4,
 	}
 
 	content_lower := strings.ToLower(content)
@@ -526,6 +705,8 @@ func (cta *ConversationalThreatAnalyzer) getOrCreateSession(sessionID, userID st
 			QueryPatterns:   make([]string, 0),
 			RepetitionCount: 0,
 		},
+		AnomalyEWMA: 0.0,
+		ToolCalls:   []ToolCallEvent{},
 	}
 
 	cta.sessions[sessionID] = session
@@ -598,9 +779,9 @@ func (cta *ConversationalThreatAnalyzer) GetSessionStats() map[string]interface{
 	defer cta.mutex.RUnlock()
 
 	stats := map[string]interface{}{
-		"active_sessions": len(cta.sessions),
+		"active_sessions":    len(cta.sessions),
 		"high_risk_sessions": 0,
-		"total_messages": 0,
+		"total_messages":     0,
 	}
 
 	for _, session := range cta.sessions {

