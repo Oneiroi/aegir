@@ -1,0 +1,15 @@
+.git
+.gitignore
+.env
+.env.example
+logs/
+*.log
+certs/*.key
+vendor/
+tmp/
+.claude/
+.serena/
+token_response.json
+get_default_token.sh
+*.md
+Makefile

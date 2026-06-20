@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  aegir:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aegir
+    ports:
+      - "8443:8443"
+    environment:
+      MCP_ENV: production
+      LOG_LEVEL: info
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./certs:/app/certs:ro
+      - aegir-logs:/app/logs
+    restart: unless-stopped
+    networks:
+      - monitoring
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "https://localhost:8443/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    restart: unless-stopped
+    networks:
+      - monitoring
+    depends_on:
+      - aegir
+
+volumes:
+  aegir-logs:
+    driver: local
+  prometheus-data:
+    driver: local
+
+networks:
+  monitoring:
+    driver: bridge

@@ -1,0 +1,65 @@
+# Aegir — Anthropic judge via LiteLLM example configuration
+#
+# This configuration uses Anthropic's claude-haiku-3-5 as the LLM judge backend,
+# bridged via LiteLLM which translates OpenAI /v1/chat/completions wire format
+# to Anthropic's native /v1/messages API.
+#
+# Prerequisites:
+#   pip install litellm
+#   export ANTHROPIC_API_KEY=your-key-here
+#   litellm --model anthropic/claude-haiku-3-5 --port 4000
+#
+# Then run Aegir:
+#   MCP_SERVER_TLS_ENABLED=false ./bin/aegir --config aegir.anthropic-litellm.example.yaml
+#
+# To swap provider, change base_url and model only:
+#   OpenAI:    base_url: https://api.openai.com, model: gpt-4o-mini
+#   Groq:      base_url: https://api.groq.com/openai, model: llama-3.1-8b-instant
+#   OpenRouter: base_url: https://openrouter.ai/api, model: anthropic/claude-haiku-3-5
+#   Ollama:    base_url: http://localhost:11434, model: llama3 (no api_key needed)
+
+environment: development
+
+server:
+  port: 8443
+  host: localhost
+  tls:
+    enabled: false      # set true for production; supply cert_file and key_file
+    cert_file: certs/cert.pem
+    key_file: certs/key.pem
+
+auth:
+  jwt:
+    secret: "change-for-production-minimum-32-characters"
+    issuer: "aegir"
+  api_keys:
+    enabled: true
+
+logging:
+  level: info
+  format: text
+  hmac_key: "development-hmac-key-that-is-definitely-32-characters-long"
+
+security:
+  sanitization:
+    enabled: true
+    prompt_injection: true
+  anomaly_detection:
+    enabled: true
+    block_threshold: 0.85   # anomaly score above this → SUSPICIOUS → judge
+    log_threshold: 0.60     # log only if score above this but below block_threshold
+
+judge:
+  # LiteLLM proxy: translates /v1/chat/completions → Anthropic /v1/messages
+  # Port 4000 is LiteLLM's default; adjust if you changed --port above.
+  base_url: http://localhost:4000
+  model: anthropic/claude-haiku-3-5
+  api_key: your-anthropic-api-key-here   # passed through to LiteLLM as Bearer token
+  timeout_ms: 10000                       # fail-closed on timeout — 10s for remote inference
+
+upstream:
+  services:
+    - name: local-mcp-service
+      url: http://localhost:8080
+      enabled: true
+      timeout: 30
