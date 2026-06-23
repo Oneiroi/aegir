@@ -1,10 +1,13 @@
 package config
 
 import (
+	cryptorand "crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/viper"
@@ -33,6 +36,15 @@ type JudgeConfig struct {
 	APIKey    string `json:"api_key"    mapstructure:"api_key"`
 	TimeoutMs int    `json:"timeout_ms" mapstructure:"timeout_ms"`
 
+	// Provider selects the judge wire-protocol adapter (M013, ISC-138):
+	// "ollama" (default), "openai" (OpenAI-compatible: OMLX/LM Studio/LiteLLM),
+	// or "anthropic" (Messages API). Empty defaults to ollama.
+	Provider string `json:"provider" mapstructure:"provider"`
+
+	// Fallbacks is an ordered list of backends tried on TRANSPORT error of the
+	// primary (ISC-141). Never consulted on a judge verdict or refusal.
+	Fallbacks []JudgeFallback `json:"fallbacks" mapstructure:"fallbacks"`
+
 	// ExposeReasoning, when true, emits the judge's verdict reason to the
 	// client (the X-Aegir-Judge-Reason header and the BLOCK error Data field)
 	// for debugging and audit. DEFAULT FALSE — the client-isolation principle
@@ -41,6 +53,16 @@ type JudgeConfig struct {
 	// HIPAA/PCI) violation when that payload contains regulated data. Enabling
 	// this logs a loud startup WARNING. Use only in trusted debug environments.
 	ExposeReasoning bool `json:"expose_reasoning" mapstructure:"expose_reasoning"`
+}
+
+// JudgeFallback is one ordered failover backend for the judge (M013, ISC-141).
+// Mirrors judge.FallbackConfig; kept in the config package to avoid a
+// config→judge import dependency (server.go translates between them).
+type JudgeFallback struct {
+	BaseURL  string `json:"base_url" mapstructure:"base_url"`
+	Model    string `json:"model"    mapstructure:"model"`
+	APIKey   string `json:"api_key"  mapstructure:"api_key"`
+	Provider string `json:"provider" mapstructure:"provider"`
 }
 
 // Telemetry configuration for OpenTelemetry tracing
@@ -133,6 +155,19 @@ type AnomalyDetection struct {
 	Enabled        bool    `json:"enabled"          mapstructure:"enabled"`
 	BlockThreshold float64 `json:"block_threshold"  mapstructure:"block_threshold"` // Block if score > this (0.0-1.0)
 	LogThreshold   float64 `json:"log_threshold"    mapstructure:"log_threshold"`   // Log only if score > this, < block_threshold
+	// Profiles allows per-context threshold overrides (ISC-20). The active
+	// profile is selected via the X-Aegir-Profile request header or the
+	// upstream.profile config key. Example profiles: "finance", "assistant".
+	// Each profile may override block_threshold and log_threshold.
+	Profiles       map[string]AnomalyProfile `json:"profiles" mapstructure:"profiles"`
+}
+
+// AnomalyProfile holds per-context threshold overrides for anomaly detection (ISC-20/21).
+type AnomalyProfile struct {
+	BlockThreshold  *float64 `json:"block_threshold"  mapstructure:"block_threshold"`
+	LogThreshold    *float64 `json:"log_threshold"    mapstructure:"log_threshold"`
+	// EntropyThreshold allows per-upstream entropy tuning (ISC-21).
+	EntropyThreshold *float64 `json:"entropy_threshold" mapstructure:"entropy_threshold"`
 }
 
 // Detection is the master switch for ALL pattern-based detection performed by
@@ -153,7 +188,42 @@ type Security struct {
 	SecretDetection   SecretDetection   `json:"secret_detection"   mapstructure:"secret_detection"`
 	CommandInjection  CommandInjection  `json:"command_injection"  mapstructure:"command_injection"`
 	AnomalyDetection  AnomalyDetection  `json:"anomaly_detection"  mapstructure:"anomaly_detection"`
-	Detection         Detection         `json:"detection"         mapstructure:"detection"`
+	Detection         Detection         `json:"detection"          mapstructure:"detection"`
+	HumanApproval    HumanApprovalConfig `json:"human_approval"   mapstructure:"human_approval"`
+	// AllowedOrigins is the list of browser origins permitted to call HTTP MCP
+	// endpoints. Requests bearing an Origin header not in this list are blocked
+	// with 403. Requests without an Origin header (non-browser clients) pass
+	// unconditionally. Empty list means all origins are allowed. (ISC-120)
+	AllowedOrigins   []string            `json:"allowed_origins"  mapstructure:"allowed_origins"`
+	// ReconRateLimit tracks per-session tools/list call frequency and fires a
+	// tools_list_recon_suspected log event when the threshold is exceeded. (ISC-121)
+	ReconRateLimit   ReconRateLimitConfig `json:"recon_rate_limit" mapstructure:"recon_rate_limit"`
+	// OAuthScopeAudit parses JWT bearer tokens on incoming requests and fires
+	// excessive_scope_detected when any prohibited scope is present. (ISC-122)
+	OAuthScopeAudit  OAuthScopeAuditConfig `json:"oauth_scope_audit" mapstructure:"oauth_scope_audit"`
+}
+
+// OAuthScopeAuditConfig configures JWT scope auditing (ISC-122).
+type OAuthScopeAuditConfig struct {
+	Enabled          bool     `json:"enabled"           mapstructure:"enabled"`
+	ProhibitedScopes []string `json:"prohibited_scopes" mapstructure:"prohibited_scopes"`
+}
+
+// ReconRateLimitConfig configures per-session tools/list frequency detection (ISC-121).
+type ReconRateLimitConfig struct {
+	Enabled             bool `json:"enabled"               mapstructure:"enabled"`
+	ToolsListMaxPerMin  int  `json:"tools_list_max_per_min" mapstructure:"tools_list_max_per_min"`
+}
+
+// HumanApprovalConfig gates destructive tool calls behind an external webhook
+// (ISC-119). Tools whose names match any prefix in Patterns are held; the
+// webhook is called with the tool name, arguments, and session context and must
+// respond with {"approved":true} within Timeout or the call is blocked.
+type HumanApprovalConfig struct {
+	Enabled    bool          `json:"enabled"     mapstructure:"enabled"`
+	Patterns   []string      `json:"patterns"    mapstructure:"patterns"`
+	WebhookURL string        `json:"webhook_url" mapstructure:"webhook_url"`
+	Timeout    time.Duration `json:"timeout"     mapstructure:"timeout"`
 }
 
 // RateLimit configuration
@@ -204,10 +274,15 @@ type CommandInjection struct {
 
 // Compliance configuration
 type Compliance struct {
-	HIPAA HIPAAConfig `json:"hipaa" mapstructure:"hipaa"`
-	PCI   PCIConfig   `json:"pci"   mapstructure:"pci"`
-	GDPR  GDPRConfig  `json:"gdpr"  mapstructure:"gdpr"`
-	SOC2  SOC2Config  `json:"soc2"  mapstructure:"soc2"`
+	HIPAA          HIPAAConfig       `json:"hipaa"            mapstructure:"hipaa"`
+	PCI            PCIConfig         `json:"pci"              mapstructure:"pci"`
+	GDPR           GDPRConfig        `json:"gdpr"             mapstructure:"gdpr"`
+	SOC2           SOC2Config        `json:"soc2"             mapstructure:"soc2"`
+	// ResponsePolicy maps violation type (e.g. "pii", "phi", "pci") to the action
+	// taken when that data type is found in a response: "block", "redact", or
+	// "log-only". Absent types fall back to "redact". Configured via
+	// compliance.response_policy in aegir.yaml (ISC-28).
+	ResponsePolicy map[string]string `json:"response_policy"  mapstructure:"response_policy"`
 }
 
 // HIPAAConfig for HIPAA compliance
@@ -518,6 +593,9 @@ func setDefaults(v *viper.Viper) {
 	// principle; GDPR/HIPAA/PCI). Opt-in only, for trusted debug environments.
 	v.SetDefault("judge.expose_reasoning", false)
 
+	// Judge backend defaults (M013): local-first Ollama unless overridden.
+	v.SetDefault("judge.provider", "ollama")
+
 	v.SetDefault("security.encryption.algorithm", "AES-256-GCM")
 	v.SetDefault("security.encryption.key_size", 256)
 	v.SetDefault("security.encryption.key_rotation", 90)
@@ -540,6 +618,12 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("compliance.pci.enabled", false)
 	v.SetDefault("compliance.gdpr.enabled", false)
 	v.SetDefault("compliance.soc2.enabled", false)
+	// Per-data-type response policy defaults (ISC-28): redact all regulated types by default.
+	v.SetDefault("compliance.response_policy", map[string]interface{}{
+		"pii": "redact",
+		"phi": "redact",
+		"pci": "redact",
+	})
 
 	// Session Analysis defaults
 	v.SetDefault("session_analysis.enabled", true)
@@ -555,6 +639,23 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("security.anomaly_detection.enabled", false)
 	v.SetDefault("security.anomaly_detection.block_threshold", 0.95)
 	v.SetDefault("security.anomaly_detection.log_threshold", 0.60)
+
+	// CSRF/Origin validation defaults (ISC-120): empty list = allow all origins.
+	v.SetDefault("security.allowed_origins", []string{})
+
+	// Recon rate limit defaults (ISC-121).
+	v.SetDefault("security.recon_rate_limit.enabled", true)
+	v.SetDefault("security.recon_rate_limit.tools_list_max_per_min", 10)
+
+	// OAuth scope audit defaults (ISC-122).
+	v.SetDefault("security.oauth_scope_audit.enabled", true)
+	v.SetDefault("security.oauth_scope_audit.prohibited_scopes", []string{"*", "admin", "write:all"})
+
+	// Human approval gate defaults (ISC-119): disabled by default; common destructive prefixes.
+	v.SetDefault("security.human_approval.enabled", false)
+	v.SetDefault("security.human_approval.patterns", []string{"delete_", "drop_", "purge_", "format_", "overwrite_"})
+	v.SetDefault("security.human_approval.webhook_url", "")
+	v.SetDefault("security.human_approval.timeout", 30*time.Second)
 
 	// Judge defaults — opt-in; disabled by default so pattern-only deployments work without Ollama
 	v.SetDefault("judge.enabled", false)
@@ -857,8 +958,26 @@ func getEnvAsFloat(key string, fallback float64) float64 {
 	return fallback
 }
 
+// devSecret is generated once per process so that restarts within a single
+// development run do not silently rotate the signing key and break audit chains.
+// The "CHANGE_ME_IN_PRODUCTION_" prefix is intentional: the secret guard in
+// secret_guard.go will refuse to start unless AEGIR_ALLOW_INSECURE_JWT_SECRET
+// is set, making this safe to ship as a default. In production, set the
+// JWT_SECRET (and LOG_HMAC_KEY) environment variables to stable, operator-managed
+// values — never rely on this ephemeral fallback for audit continuity.
+var (
+	devSecretOnce  sync.Once
+	devSecretValue string
+)
+
 func generateRandomSecret() string {
-	// In production, this should be loaded from a secure source
-	// For now, return a placeholder that must be replaced
-	return "CHANGE_ME_IN_PRODUCTION_" + fmt.Sprintf("%d", time.Now().Unix())
+	devSecretOnce.Do(func() {
+		b := make([]byte, 32)
+		if _, err := cryptorand.Read(b); err != nil {
+			devSecretValue = "CHANGE_ME_IN_PRODUCTION_fallback"
+			return
+		}
+		devSecretValue = "CHANGE_ME_IN_PRODUCTION_" + hex.EncodeToString(b)
+	})
+	return devSecretValue
 }

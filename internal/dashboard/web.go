@@ -93,15 +93,15 @@ const dashboardHTML = `<!DOCTYPE html>
             <div id="login-error" class="error-message" style="display: none;"></div>
             <div class="form-group">
                 <label for="username">Username</label>
-                <input type="text" id="username" value="admin">
+                <input type="text" id="username" placeholder="admin" autocomplete="username">
             </div>
             <div class="form-group">
                 <label for="password">Password</label>
-                <input type="password" id="password" value="admin123">
+                <input type="password" id="password" placeholder="Password" autocomplete="current-password">
             </div>
             <button class="btn" onclick="handleLogin()">Sign In</button>
             <div style="text-align: center; margin-top: 1rem;">
-                <small style="color: #718096;">Default: admin / admin123</small>
+                <small style="color: #718096;">The admin password is generated at first start and printed to the server log (set AEGIR_ADMIN_PASSWORD to choose your own).</small>
             </div>
         </div>
 

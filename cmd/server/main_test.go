@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +15,10 @@ import (
 )
 
 func TestTransportModeSelection(t *testing.T) {
+	// The dev config ships a placeholder JWT secret; opt into it so the
+	// production secret guard (CheckProductionSecrets) doesn't block startup.
+	t.Setenv("AEGIR_ALLOW_INSECURE_JWT_SECRET", "true")
+
 	// Test data for different transport modes
 	tests := []struct {
 		name            string
@@ -260,18 +265,30 @@ func TestGracefulShutdown(t *testing.T) {
 	defer cancel()
 
 	testCmd := exec.CommandContext(ctx, "./test-aegir-shutdown", "-transport", "http")
-	testCmd.Env = append(os.Environ(), "MCP_SERVER_TLS_ENABLED=false")
+	testCmd.Env = append(os.Environ(),
+		"MCP_SERVER_TLS_ENABLED=false",
+		// Dev config ships a placeholder JWT secret; opt past the production guard.
+		"AEGIR_ALLOW_INSECURE_JWT_SECRET=true")
 
-	var stderr bytes.Buffer
-	testCmd.Stderr = &stderr
+	stderr := &syncBuffer{}
+	testCmd.Stderr = stderr
 
 	// Start the command
 	if err := testCmd.Start(); err != nil {
 		t.Fatalf("Failed to start test binary: %v", err)
 	}
 
-	// Give it a moment to start
-	time.Sleep(500 * time.Millisecond)
+	// Wait until the server has actually logged that it started before
+	// signalling shutdown. Route registration + init routinely take longer than
+	// a fixed sleep on a loaded host, which previously raced this assertion.
+	const startupMsg = "Starting MCP Firewall server in http mode"
+	deadline := time.Now().Add(15 * time.Second)
+	for !strings.Contains(stderr.String(), startupMsg) {
+		if time.Now().After(deadline) {
+			t.Fatalf("server did not log startup within timeout; stderr:\n%s", stderr.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 
 	// Send interrupt signal
 	if err := testCmd.Process.Signal(os.Interrupt); err != nil {
@@ -281,14 +298,27 @@ func TestGracefulShutdown(t *testing.T) {
 	// Wait for graceful shutdown
 	err := testCmd.Wait()
 
-	// Check stderr for shutdown messages
-	stderrStr := stderr.String()
-	if !strings.Contains(stderrStr, "Starting MCP Firewall server in http mode") {
-		t.Error("Expected startup message not found")
-	}
-
 	// The process should exit cleanly (context cancellation is expected)
 	if err != nil && !strings.Contains(err.Error(), "signal: interrupt") {
 		t.Errorf("Unexpected error during shutdown: %v", err)
 	}
+}
+
+// syncBuffer is a goroutine-safe buffer: the test polls stderr while the child
+// process writes to it concurrently, so a plain bytes.Buffer would data-race.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

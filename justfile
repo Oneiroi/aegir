@@ -7,29 +7,30 @@ default: build
 build:
     go build -o bin/aegir ./cmd/server
 
-# Build and run (HTTP mode)
+# Build and run (HTTP mode). AEGIR_ALLOW_INSECURE_JWT_SECRET permits the dev
+# secret in aegir.yaml; production runs ./bin/aegir without it and fails closed.
 run: build certs
-    ./bin/aegir
+    AEGIR_ALLOW_INSECURE_JWT_SECRET=true ./bin/aegir
 
 # Build and run with STDIO transport
 run-stdio: build
-    ./bin/aegir -transport stdio
+    AEGIR_ALLOW_INSECURE_JWT_SECRET=true ./bin/aegir -transport stdio
 
 # Build and run with SSE transport
 run-sse: build certs
-    ./bin/aegir -transport sse
+    AEGIR_ALLOW_INSECURE_JWT_SECRET=true ./bin/aegir -transport sse
 
 # Run from source (no build step)
 dev: certs
-    go run ./cmd/server
+    AEGIR_ALLOW_INSECURE_JWT_SECRET=true go run ./cmd/server
 
 # Run from source with STDIO transport
 dev-stdio:
-    go run ./cmd/server -transport stdio
+    AEGIR_ALLOW_INSECURE_JWT_SECRET=true go run ./cmd/server -transport stdio
 
 # TLS + rate-limiting disabled for quick testing
 demo: build
-    TLS_ENABLED=false RATE_LIMIT_ENABLED=false go run ./cmd/server
+    AEGIR_ALLOW_INSECURE_JWT_SECRET=true TLS_ENABLED=false RATE_LIMIT_ENABLED=false go run ./cmd/server
 
 # Run all tests
 test:
@@ -82,4 +83,8 @@ echo-server: build-echo
 
 # Run the full demo flow — builds, starts server + mock upstream, loops test scenarios
 demo-flow:
-    ./bin/demo-flow-test.sh
+    AEGIR_ALLOW_INSECURE_JWT_SECRET=true ./bin/demo-flow-test.sh
+
+# CI/ISC-84 probe: one-shot demo run — exits 0 when all flows pass
+demo-flow-test:
+    AEGIR_ALLOW_INSECURE_JWT_SECRET=true ./bin/demo-flow-test.sh --once

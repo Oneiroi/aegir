@@ -13,7 +13,7 @@ server:
 
 auth:
   jwt:
-    secret: "CHANGE_ME_GENERATE_32B_RANDOM_SECRET"
+    secret: "simple-dev-key-change-for-production"
     issuer: "aegir"
   api_keys:
     enabled: true

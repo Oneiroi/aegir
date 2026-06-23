@@ -39,10 +39,17 @@ func TestJudgeReasonNeverLeaksToClient(t *testing.T) {
 	logger := testLogger()
 	ruleEng := judge.NewRuleEngine(&reasonLeakJudge{reason: canary}, logger)
 
+	// Enable detection + homoglyph filter so the Cyrillic 'а' (U+0430) in the
+	// payload below triggers a medium-severity detection — detected but NOT
+	// blocked by the sanitizer, so the payload reaches the mock judge.
+	secCfg := config.Security{
+		Detection:    config.Detection{Enabled: true},
+		Sanitization: config.Sanitization{Enabled: true, HomoglyphFilter: true},
+	}
 	proxy := NewMCPProxy(
-		&config.Config{},
+		&config.Config{Security: secCfg},
 		logger,
-		sanitizer.New(config.Security{}, logger),
+		sanitizer.New(secCfg, logger),
 		sanitizer.NewComplianceManager(config.Compliance{}, logger),
 		upstream.NewManager(&config.Upstream{}, logger),
 		nil, // session analyzer not needed for this path
@@ -53,9 +60,12 @@ func TestJudgeReasonNeverLeaksToClient(t *testing.T) {
 	r := gin.New()
 	r.POST("/mcp", proxy.HandleMCPRequest)
 
+	// Cyrillic 'а' (U+0430, not ASCII 'a') triggers homoglyph detection at
+	// medium severity — the sanitizer flags but does not block it, so the
+	// payload is routed SUSPICIOUS → mock judge → BLOCK.
 	body, _ := json.Marshal(MCPRequest{
 		Method: "tools/call",
-		Params: map[string]interface{}{"name": "test"},
+		Params: map[string]interface{}{"name": "test", "q": "аnything"},
 		ID:     "leak-1",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
@@ -92,10 +102,14 @@ func TestJudgeReasonExposedWhenOptedIn(t *testing.T) {
 	logger := testLogger()
 	ruleEng := judge.NewRuleEngine(&reasonLeakJudge{reason: canary}, logger)
 
+	secCfg := config.Security{
+		Detection:    config.Detection{Enabled: true},
+		Sanitization: config.Sanitization{Enabled: true, HomoglyphFilter: true},
+	}
 	proxy := NewMCPProxy(
-		&config.Config{Judge: config.JudgeConfig{ExposeReasoning: true}},
+		&config.Config{Judge: config.JudgeConfig{ExposeReasoning: true}, Security: secCfg},
 		logger,
-		sanitizer.New(config.Security{}, logger),
+		sanitizer.New(secCfg, logger),
 		sanitizer.NewComplianceManager(config.Compliance{}, logger),
 		upstream.NewManager(&config.Upstream{}, logger),
 		nil, nil, ruleEng,
@@ -104,7 +118,7 @@ func TestJudgeReasonExposedWhenOptedIn(t *testing.T) {
 	r := gin.New()
 	r.POST("/mcp", proxy.HandleMCPRequest)
 
-	body, _ := json.Marshal(MCPRequest{Method: "tools/call", Params: map[string]interface{}{"name": "test"}, ID: "expose-1"})
+	body, _ := json.Marshal(MCPRequest{Method: "tools/call", Params: map[string]interface{}{"name": "test", "q": "аnything"}, ID: "expose-1"})
 	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()

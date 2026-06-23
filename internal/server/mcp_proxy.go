@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,17 +27,6 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// HeldRequest represents an MCP request that is currently being held for deeper analysis.
-type HeldRequest struct {
-	ID           interface{}
-	Method       string
-	Params       interface{}
-	Context      context.Context
-	Cancel       context.CancelFunc
-	CreatedAt    time.Time
-	ResponseChan chan *MCPResponse
-}
-
 // MCPProxy handles proxying and securing MCP requests
 type MCPProxy struct {
 	logger            *logging.Logger
@@ -51,10 +41,9 @@ type MCPProxy struct {
 	anomalyCount      atomic.Uint64
 	anomalyScoreSum   atomic.Uint64 // stored as score*1e6 to avoid float atomics
 
-	// Async Hold Management
-	holdMu       sync.RWMutex
-	heldRequests map[string]*HeldRequest // key: request_id (as string)
-	holdTimeout  time.Duration
+	// Recon rate limit (ISC-121): per-session tools/list call timestamps.
+	reconMu     sync.Mutex
+	reconCalls  map[string][]time.Time // key: session ID → slice of call timestamps
 }
 
 // AnomalyStats holds aggregate anomaly scoring data for metrics.
@@ -107,12 +96,23 @@ func NewMCPProxy(cfg *config.Config, logger *logging.Logger, sanitizerMgr *sanit
 		anomalyDetector:   anomalyDet,
 		ruleEngine:        ruleEng,
 		upgrader: websocket.Upgrader{
+			// Validate the WebSocket Origin against AllowedOrigins (ISC-120).
+			// Non-browser clients omit Origin and always pass. An empty
+			// AllowedOrigins list permits all origins (default/non-restrictive).
 			CheckOrigin: func(r *http.Request) bool {
-				return true
+				origin := r.Header.Get("Origin")
+				if origin == "" || len(cfg.Security.AllowedOrigins) == 0 {
+					return true
+				}
+				for _, allowed := range cfg.Security.AllowedOrigins {
+					if allowed == origin {
+						return true
+					}
+				}
+				return false
 			},
 		},
-		heldRequests: make(map[string]*HeldRequest),
-		holdTimeout:  30 * time.Second, // Default hold timeout
+		reconCalls: make(map[string][]time.Time),
 	}
 }
 
@@ -325,11 +325,16 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 		req.Params = sanitizedParams
 	}
 
-	// --- Judge Proxy Wiring (ISC-32 through ISC-36, ISC-93) ---
+	// --- Judge Proxy Wiring (ISC-33, ISC-93) ---
 	// Skip entirely when judge is not configured (pattern-only mode).
 	if p.ruleEngine != nil {
 		judgePayload, _ := json.Marshal(req.Params)
-		judgeResult, err := p.ruleEngine.Route(c.Request.Context(), judge.SUSPICIOUS, string(judgePayload))
+		// Translate sanitizer verdict to a judge routing signal.
+		// ALLOW short-circuits the judge (no LLM call, zero latency).
+		// SUSPICIOUS routes the payload to the configured judge model.
+		// Payloads already blocked by the sanitizer above never reach here.
+		judgeVerdict := sanitizerVerdictToJudge(sanitizationResult)
+		judgeResult, err := p.ruleEngine.Route(c.Request.Context(), judgeVerdict, string(judgePayload))
 		if err != nil {
 			p.logger.Error("Judge routing error", "error", err)
 			c.JSON(http.StatusForbidden, MCPResponse{
@@ -344,14 +349,19 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 		}
 
 		switch judgeResult.Verdict {
-		case judge.BLOCK:
+		case judge.BLOCK, judge.SUSPICIOUS:
+			// Both BLOCK and SUSPICIOUS from the judge result in an immediate
+			// block and audit-log entry. No real-time human-in-the-loop hold —
+			// this proxy is a low-latency boundary; fail-closed is the correct
+			// behaviour. Human review happens asynchronously via the audit log.
+			// ISC-33/ISC-93: judge reasoning is logged server-side only. It is
+			// emitted to the client solely under the explicit debug opt-in
+			// (ExposeReasoning), which carries a GDPR/HIPAA/PCI warning.
 			p.logger.Warn("MCP request blocked by judge",
 				"method", req.Method,
+				"verdict", judgeResult.Verdict,
 				"reason", judgeResult.Reason,
 				"model", judgeResult.ModelName)
-			// ISC-33/ISC-93: opaque error by default — judge reasoning is
-			// logged server-side above, never returned to the client. Emitted
-			// only when the operator opts into the GDPR-violating debug toggle.
 			blockErr := &MCPError{
 				Code:    -32000,
 				Message: "Request blocked by security policy",
@@ -360,24 +370,6 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 				blockErr.Data = judgeResult.Reason
 			}
 			c.JSON(http.StatusForbidden, MCPResponse{Error: blockErr, ID: req.ID})
-			return
-
-		case judge.SUSPICIOUS:
-			// ISC-32: hold request for async analysis. Client gets an opaque
-			// in-progress status only; ISC-33/ISC-93 forbid leaking judge
-			// reasoning by default, so the reason is logged server-side. It is
-			// emitted to the client only under the explicit debug opt-in.
-			p.logger.Info("MCP request held for deeper analysis (SUSPICIOUS)",
-				"method", req.Method,
-				"reason", judgeResult.Reason,
-				"model", judgeResult.ModelName)
-			c.Header("X-Aegir-Status", "in-progress")
-			if p.config.Judge.ExposeReasoning {
-				c.Header("X-Aegir-Judge-Reason", judgeResult.Reason)
-			}
-			// Block until resolution or timeout; fail-closed on timeout (ISC-34, ISC-35, ISC-36).
-			statusCode, response := p.handleAsyncHold(c, &req, judgeResult)
-			c.JSON(statusCode, response)
 			return
 
 		case judge.ALLOW:
@@ -434,6 +426,8 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 	// For tools/list, prepend Aegir's built-in security tools (ISC-76).
 	if req.Method == "tools/list" {
 		response = p.mergeToolsList(response, &req)
+		// Per-session tools/list recon rate limiting (ISC-121).
+		p.trackReconCall(c, &req)
 	}
 
 	// Sanitize response before returning
@@ -450,7 +444,10 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 		}
 	}
 
-	// Log compliance violations in response
+	// Log compliance violations in response (ISC-27): every PII/PHI/PCI
+	// detection is recorded with its per-type severity, not just an aggregate
+	// count, so the audit trail shows which regulated data types were present
+	// in the model output and at what severity.
 	if len(responseComplianceResult.Violations) > 0 {
 		p.logger.LogSecurityEvent(&logging.SecurityEvent{
 			Type:      "response_compliance_violation",
@@ -460,8 +457,41 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 			Details: map[string]string{
 				"violations": strconv.Itoa(len(responseComplianceResult.Violations)),
 				"risk_level": responseComplianceResult.ComplianceRisk,
+				"data_types": summarizeComplianceViolations(responseComplianceResult.Violations),
 			},
 		})
+
+		// Apply per-data-type response policy (ISC-28). For each violation, look up
+		// the configured action for its type in compliance.response_policy. Highest-
+		// priority action wins across all violations: block > redact > log-only.
+		// Absent types default to "redact".
+		action := p.responseComplianceAction(responseComplianceResult.Violations)
+		switch action {
+		case "block":
+			p.logger.Warn("MCP response blocked by per-type compliance policy",
+				"violations", len(responseComplianceResult.Violations),
+				"action", "block")
+			c.JSON(http.StatusForbidden, MCPResponse{
+				Error: &MCPError{
+					Code:    -32600,
+					Message: "Response blocked by compliance policy",
+				},
+				ID: req.ID,
+			})
+			return
+		case "redact":
+			// responseSanitized already has sanitizer redactions applied above;
+			// for compliance-specific redaction we re-apply on the post-scan text
+			// to ensure the policy-triggered path also strips the regulated content.
+			redacted := p.sanitizer.SanitizeContent(responseComplianceResult.Sanitized)
+			if redacted.Sanitized != responseComplianceResult.Sanitized {
+				var redactedResult interface{}
+				if err := json.Unmarshal([]byte(redacted.Sanitized), &redactedResult); err == nil {
+					response.Result = redactedResult
+				}
+			}
+		// "log-only": already logged above; fall through to forward response as-is.
+		}
 	}
 
 	c.JSON(http.StatusOK, response)
@@ -703,6 +733,64 @@ func (p *MCPProxy) scanToolResultForInjection(result interface{}) (blocked bool,
 	return false, ""
 }
 
+// summarizeComplianceViolations produces a stable, audit-friendly breakdown of
+// compliance violations for the response_compliance_violation log event
+// (ISC-27). Each fragment is "pattern[class]:severity×count" — keyed on the
+// specific data identifier (ssn, email, icd10, card…) because severity varies
+// per identifier within a regulation class, so an aggregate would misreport it.
+// Ordered by pattern for determinism. Records what regulated data appeared and
+// how serious each was, without replaying the regulated values themselves.
+func summarizeComplianceViolations(violations []sanitizer.Violation) string {
+	type agg struct {
+		class    string
+		severity string
+		count    int
+	}
+	byPattern := make(map[string]*agg)
+	order := make([]string, 0)
+	for _, v := range violations {
+		a, ok := byPattern[v.Pattern]
+		if !ok {
+			a = &agg{class: v.Type, severity: v.Severity}
+			byPattern[v.Pattern] = a
+			order = append(order, v.Pattern)
+		}
+		a.count++
+	}
+	sort.Strings(order)
+	frags := make([]string, 0, len(order))
+	for _, p := range order {
+		a := byPattern[p]
+		frags = append(frags, fmt.Sprintf("%s[%s]:%s×%d", p, a.class, a.severity, a.count))
+	}
+	return strings.Join(frags, ", ")
+}
+
+// responseComplianceAction returns the highest-priority action for a set of
+// violations, using the per-data-type policy from compliance.response_policy
+// (ISC-28). Priority order: block > redact > log-only. Absent types default to
+// "redact". An empty/nil violation list returns "log-only".
+func (p *MCPProxy) responseComplianceAction(violations []sanitizer.Violation) string {
+	if len(violations) == 0 {
+		return "log-only"
+	}
+	policy := p.config.Compliance.ResponsePolicy
+	priority := map[string]int{"block": 2, "redact": 1, "log-only": 0}
+	best := "log-only"
+	for _, v := range violations {
+		action := "redact" // default for unmapped types
+		if policy != nil {
+			if a, ok := policy[v.Type]; ok {
+				action = a
+			}
+		}
+		if priority[action] > priority[best] {
+			best = action
+		}
+	}
+	return best
+}
+
 // extractToolResultText pulls content[].text strings from an MCP tools/call result.
 func extractToolResultText(result interface{}) []string {
 	resultMap, ok := result.(map[string]interface{})
@@ -755,6 +843,32 @@ func (p *MCPProxy) handleToolsCall(_ context.Context, req *MCPRequest) *MCPRespo
 		}
 	}
 
+	// Human approval gate (ISC-119): hold destructive tool calls for external approval.
+	toolName, _ := params["name"].(string)
+	if p.config != nil && p.config.Security.HumanApproval.Enabled && toolName != "" {
+		ha := p.config.Security.HumanApproval
+		if isDestructiveTool(toolName, ha.Patterns) {
+			if err := p.requestHumanApproval(toolName, args, ha); err != nil {
+				p.logger.Warn("Human approval gate: blocked destructive tool call",
+					"tool", toolName, "reason", err.Error())
+				p.logger.LogSecurityEvent(&logging.SecurityEvent{
+					Type:     "human_approval_timeout",
+					Severity: "high",
+					Message:  "Destructive tool call blocked: human approval not received",
+					Timestamp: time.Now(),
+					Details:  map[string]string{"tool": toolName, "reason": err.Error()},
+				})
+				return &MCPResponse{
+					Error: &MCPError{
+						Code:    -32000,
+						Message: "Request blocked: human approval required for destructive operation",
+					},
+					ID: req.ID,
+				}
+			}
+		}
+	}
+
 	contentArg := ""
 	if args != nil {
 		if c, ok := args["content"].(string); ok {
@@ -779,6 +893,102 @@ func (p *MCPProxy) handleToolsCall(_ context.Context, req *MCPRequest) *MCPRespo
 		},
 		ID: req.ID,
 	}
+}
+
+// trackReconCall records a tools/list call for the session and fires a
+// tools_list_recon_suspected event when the per-minute threshold is exceeded (ISC-121).
+func (p *MCPProxy) trackReconCall(c *gin.Context, req *MCPRequest) {
+	if p.config == nil {
+		return
+	}
+	rl := p.config.Security.ReconRateLimit
+	if !rl.Enabled {
+		return
+	}
+	sessionID := p.getSessionID(c)
+	threshold := rl.ToolsListMaxPerMin
+	if threshold <= 0 {
+		threshold = 10
+	}
+	window := time.Now().Add(-time.Minute)
+
+	p.reconMu.Lock()
+	if p.reconCalls == nil {
+		p.reconCalls = make(map[string][]time.Time)
+	}
+	calls := p.reconCalls[sessionID]
+	// Prune timestamps older than 1 minute.
+	fresh := calls[:0]
+	for _, t := range calls {
+		if t.After(window) {
+			fresh = append(fresh, t)
+		}
+	}
+	fresh = append(fresh, time.Now())
+	p.reconCalls[sessionID] = fresh
+	count := len(fresh)
+	p.reconMu.Unlock()
+
+	if count > threshold {
+		p.logger.LogSecurityEvent(&logging.SecurityEvent{
+			Type:      "tools_list_recon_suspected",
+			Severity:  "high",
+			Message:   "tools/list recon rate threshold exceeded",
+			ClientIP:  c.ClientIP(),
+			Timestamp: time.Now(),
+			Details: map[string]string{
+				"session_id": sessionID,
+				"calls_per_min": strconv.Itoa(count),
+				"threshold": strconv.Itoa(threshold),
+			},
+		})
+	}
+}
+
+// isDestructiveTool returns true if name starts with any of the configured patterns.
+func isDestructiveTool(name string, patterns []string) bool {
+	lower := strings.ToLower(name)
+	for _, p := range patterns {
+		if strings.HasPrefix(lower, strings.ToLower(p)) {
+			return true
+		}
+	}
+	return false
+}
+
+// requestHumanApproval POSTs the tool name and args to the configured webhook
+// and waits up to Timeout for {"approved":true}. Returns an error if the call
+// should be blocked (timeout, HTTP error, or explicit rejection).
+func (p *MCPProxy) requestHumanApproval(toolName string, args map[string]interface{}, cfg config.HumanApprovalConfig) error {
+	if cfg.WebhookURL == "" {
+		return fmt.Errorf("human_approval.webhook_url not configured")
+	}
+	payload, _ := json.Marshal(map[string]interface{}{
+		"tool":      toolName,
+		"arguments": args,
+	})
+
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Post(cfg.WebhookURL, "application/json", strings.NewReader(string(payload)))
+	if err != nil {
+		return fmt.Errorf("webhook error: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Approved bool `json:"approved"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("webhook response decode error: %w", err)
+	}
+	if !result.Approved {
+		return fmt.Errorf("approval denied by webhook")
+	}
+	return nil
 }
 
 // isSSRFTarget returns true if s is a URL targeting a private, link-local, or loopback address.
@@ -1134,50 +1344,13 @@ func (p *MCPProxy) getSessionID(c *gin.Context) string {
 	return fmt.Sprintf("%s_%s", userID, clientIP)
 }
 
-// handleAsyncHold buffers a SUSPICIOUS request and waits for resolution (ISC-32–36).
-// On admin approval the held request's ResponseChan receives the approved MCPResponse.
-// On timeout the request is fail-closed: 403 returned (ISC-35).
-func (p *MCPProxy) handleAsyncHold(c *gin.Context, req *MCPRequest, judgeResult judge.CheckResult) (int, *MCPResponse) {
-	holdID := fmt.Sprintf("%v", req.ID)
-	respChan := make(chan *MCPResponse, 1)
-
-	ctx, cancel := context.WithTimeout(c.Request.Context(), p.holdTimeout)
-	defer cancel()
-
-	p.holdMu.Lock()
-	p.heldRequests[holdID] = &HeldRequest{
-		ID:           req.ID,
-		Method:       req.Method,
-		Params:       req.Params,
-		Context:      ctx,
-		Cancel:       cancel,
-		CreatedAt:    time.Now(),
-		ResponseChan: respChan,
+// sanitizerVerdictToJudge maps the sanitizer's risk signal to a judge routing
+// verdict. ALLOW short-circuits the judge (no LLM call, zero latency);
+// SUSPICIOUS routes the payload to the configured judge model for deeper analysis.
+// Payloads that the sanitizer has already blocked never reach this function.
+func sanitizerVerdictToJudge(result *sanitizer.SanitizationResult) judge.Verdict {
+	if result != nil && (len(result.Detections) > 0 || result.Risk == "medium" || result.Risk == "high" || result.Risk == "critical") {
+		return judge.SUSPICIOUS
 	}
-	p.holdMu.Unlock()
-
-	defer func() {
-		p.holdMu.Lock()
-		delete(p.heldRequests, holdID)
-		p.holdMu.Unlock()
-	}()
-
-	select {
-	case resp := <-respChan:
-		// Admin approved (ISC-36) — forward the pre-built response.
-		return http.StatusOK, resp
-	case <-ctx.Done():
-		// Timeout → fail-closed (ISC-35).
-		p.logger.Warn("held request timed out, fail-closed",
-			"hold_id", holdID,
-			"judge_reason", judgeResult.Reason)
-		return http.StatusForbidden, &MCPResponse{
-			Error: &MCPError{
-				Code:    -32000,
-				Message: "Request blocked: security analysis timeout",
-				Data:    "fail-closed on judge hold timeout",
-			},
-			ID: req.ID,
-		}
-	}
+	return judge.ALLOW
 }

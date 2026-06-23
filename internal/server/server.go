@@ -1,7 +1,10 @@
 package server
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/aegishjalmur/aegir/internal/anomaly"
@@ -38,6 +41,31 @@ type MCPFirewall struct {
 	dashboardAPI      *dashboard.DashboardAPI
 	metricsCollector  *metrics.Collector
 	router            *gin.Engine
+}
+
+// buildJudgeConfig translates the config package's JudgeConfig into a
+// judge.Config, carrying the provider discriminator (M013, ISC-138) and the
+// ordered transport-error failover chain (ISC-141). The two packages keep
+// separate fallback types to avoid a config→judge import dependency; this is
+// the single translation point, exercised by TestBuildJudgeConfig.
+func buildJudgeConfig(jc config.JudgeConfig) judge.Config {
+	fallbacks := make([]judge.FallbackConfig, 0, len(jc.Fallbacks))
+	for _, fb := range jc.Fallbacks {
+		fallbacks = append(fallbacks, judge.FallbackConfig{
+			BaseURL:  fb.BaseURL,
+			Model:    fb.Model,
+			APIKey:   fb.APIKey,
+			Provider: fb.Provider,
+		})
+	}
+	return judge.Config{
+		BaseURL:   jc.BaseURL,
+		Model:     jc.Model,
+		APIKey:    jc.APIKey,
+		TimeoutMs: jc.TimeoutMs,
+		Provider:  jc.Provider,
+		Fallbacks: fallbacks,
+	}
 }
 
 // New creates a new MCP Firewall server instance
@@ -98,12 +126,9 @@ func New(cfg *config.Config) (*MCPFirewall, error) {
 	// Initialize LLM judge rule engine (opt-in via config; disabled = pattern-only mode)
 	var ruleEngine *judge.RuleEngine
 	if cfg.Judge.Enabled {
-		j := judge.NewOllamaJudge(judge.Config{
-			BaseURL:   cfg.Judge.BaseURL,
-			Model:     cfg.Judge.Model,
-			APIKey:    cfg.Judge.APIKey,
-			TimeoutMs: cfg.Judge.TimeoutMs,
-		}, nil, logger)
+		// Use the provider factory (M013, ISC-138) so judge.provider:
+		// openai|anthropic is reachable at runtime, not just NewOllamaJudge.
+		j := judge.NewJudge(buildJudgeConfig(cfg.Judge), nil, logger)
 		ruleEngine = judge.NewRuleEngine(j, logger)
 	}
 
@@ -212,8 +237,10 @@ func (s *MCPFirewall) setupRouter() {
 	// No auth middleware - login form handles auth client-side
 	s.dashboardAPI.RegisterWebRoutes(webDashboard)
 
-	// MCP proxy endpoints
+	// MCP proxy endpoints — CSRF/Origin validation (ISC-120) + OAuth scope audit (ISC-122).
 	mcp := protected.Group("/mcp")
+	mcp.Use(s.csrfOriginMiddleware())
+	mcp.Use(s.oauthScopeAuditMiddleware())
 	{
 		mcp.POST("/", s.mcpProxy.HandleMCPRequest)
 		mcp.POST("/resources", s.mcpProxy.HandleMCPRequest)
@@ -275,6 +302,115 @@ func (s *MCPFirewall) securityHeaders() gin.HandlerFunc {
 		c.Header("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
 		c.Next()
 	})
+}
+
+// oauthScopeAuditMiddleware inspects Bearer JWT tokens on incoming MCP requests
+// and fires an excessive_scope_detected security event when the token's scope
+// or scp claim contains a prohibited value (ISC-122). This is an audit-only
+// middleware — it logs and continues; blocking happens in the auth middleware.
+func (s *MCPFirewall) oauthScopeAuditMiddleware() gin.HandlerFunc {
+	cfg := s.config.Security.OAuthScopeAudit
+	return func(c *gin.Context) {
+		if !cfg.Enabled || len(cfg.ProhibitedScopes) == 0 {
+			c.Next()
+			return
+		}
+		authHeader := c.GetHeader("Authorization")
+		if len(authHeader) < 8 || authHeader[:7] != "Bearer " {
+			c.Next()
+			return
+		}
+		tokenStr := authHeader[7:]
+		scopes := extractJWTScopes(tokenStr)
+		for _, scope := range scopes {
+			for _, prohibited := range cfg.ProhibitedScopes {
+				if scope == prohibited {
+					s.logger.LogSecurityEvent(&logging.SecurityEvent{
+						Type:      "excessive_scope_detected",
+						Severity:  "high",
+						Message:   "JWT token contains prohibited OAuth scope",
+						ClientIP:  c.ClientIP(),
+						Timestamp: time.Now(),
+						Details: map[string]string{
+							"scope":     scope,
+							"client_ip": c.ClientIP(),
+						},
+					})
+				}
+			}
+		}
+		c.Next()
+	}
+}
+
+// extractJWTScopes returns the scope values from a JWT payload without
+// validating the signature. The scope/scp claim may be a space-separated
+// string or a []interface{} array.
+func extractJWTScopes(tokenStr string) []string {
+	parts := strings.SplitN(tokenStr, ".", 3)
+	if len(parts) != 3 {
+		return nil
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil
+	}
+	var claims map[string]interface{}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return nil
+	}
+	var scopes []string
+	for _, key := range []string{"scope", "scp"} {
+		v, ok := claims[key]
+		if !ok {
+			continue
+		}
+		switch val := v.(type) {
+		case string:
+			for _, s := range strings.Fields(val) {
+				scopes = append(scopes, s)
+			}
+		case []interface{}:
+			for _, item := range val {
+				if s, ok := item.(string); ok {
+					scopes = append(scopes, s)
+				}
+			}
+		}
+	}
+	return scopes
+}
+
+// csrfOriginMiddleware validates the Origin header on HTTP MCP endpoints (ISC-120).
+// Non-browser clients that send no Origin header are allowed unconditionally.
+// Browser clients must have their origin in security.allowed_origins; an empty
+// list allows all origins. Cross-origin requests from unlisted origins get 403
+// and a csrf_origin_rejected security event.
+func (s *MCPFirewall) csrfOriginMiddleware() gin.HandlerFunc {
+	allowedOrigins := s.config.Security.AllowedOrigins
+	return func(c *gin.Context) {
+		origin := c.GetHeader("Origin")
+		if origin == "" || len(allowedOrigins) == 0 {
+			c.Next()
+			return
+		}
+		for _, allowed := range allowedOrigins {
+			if origin == allowed {
+				c.Next()
+				return
+			}
+		}
+		s.logger.LogSecurityEvent(&logging.SecurityEvent{
+			Type:      "csrf_origin_rejected",
+			Severity:  "high",
+			Message:   "Cross-origin request rejected",
+			ClientIP:  c.ClientIP(),
+			Timestamp: time.Now(),
+			Details:   map[string]string{"origin": origin},
+		})
+		c.JSON(http.StatusForbidden, gin.H{"error": "cross-origin request not allowed"})
+		c.Abort()
+	}
 }
 
 // Logging middleware

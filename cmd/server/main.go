@@ -95,6 +95,12 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Fail closed on a weak/default JWT signing secret before serving any
+	// traffic. Overridable for local dev via AEGIR_ALLOW_INSECURE_JWT_SECRET.
+	if err := config.CheckProductionSecrets(cfg); err != nil {
+		log.Fatalf("%v", err)
+	}
+
 	// Handle different transport modes
 	switch *transport {
 	case "stdio":
