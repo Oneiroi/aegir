@@ -20,6 +20,22 @@ here.
 Aegir is a defence-in-depth proxy, not a complete MCP security solution. The following
 limitations are documented openly so operators can apply compensating controls.
 
+### LLM Judge Semantic Jailbreak
+
+The LLM judge (second-pass analysis for SUSPICIOUS payloads) is protected against
+response-injection attacks — `parseVerdict` requires the model's entire response to be exactly
+the string `ALLOW` (no surrounding text, no markdown); anything else is treated as `BLOCK`.
+This makes structural prompt injection to force an `ALLOW` verdict extremely difficult.
+
+However, a sufficiently capable adversary may still use semantic jailbreaking techniques to
+convince the judge model to emit a bare `ALLOW` response. This is a fundamental limitation of
+LLM-based detection and not specific to Aegir. The pattern-based first pass (sanitizer) provides
+a separate, non-LLM defence line; both must be bypassed for an attack to succeed.
+
+**Mitigation:** Use a capable, instruction-following judge model (`llama3.1`, `mistral-nemo` or
+similar). Consider running Aegir with `response_policy: block` for high-security deployments,
+which blocks any request the pattern layer flags regardless of the judge verdict.
+
 ### Detection Coverage Ceiling
 
 Pattern-based detection has a **hard ceiling of approximately 62% MITRE ATLAS coverage** at the
@@ -60,15 +76,52 @@ TLS-level origin validation on the SSE stream beyond the standard HTTP CORS/Orig
 Prefer WebSocket (which enforces `AllowedOrigins`) or authenticated REST for sensitive
 deployments until ISC-32 (SSE TLS protection) is addressed.
 
-### JWT Secret — Development Deployments
+### WebSocket Origin Validation Default
 
-The auto-generated dev secret (`CHANGE_ME_IN_PRODUCTION_*`) changes between processes but is
-stable within a single process run. Restarting Aegir without setting `JWT_SECRET` invalidates
-all previously issued JWTs and breaks audit chain continuity. This is by design for development;
-**production deployments must set `JWT_SECRET` to a persistent, operator-managed value.**
+When `security.allowed_origins` is not configured (empty list), the WebSocket `CheckOrigin`
+handler permits all cross-origin connections, including from browser pages. This is
+backward-compatible but is fail-open from a security perspective.
 
-The startup guard (`secret_guard.go`) refuses to start with the default secret unless
-`AEGIR_ALLOW_INSECURE_JWT_SECRET=true` is set.
+**Mitigation:** Set `security.allowed_origins` in `aegir.yaml` to the list of origins that
+should be permitted to open WebSocket connections:
+
+```yaml
+security:
+  allowed_origins:
+    - "https://your-mcp-client.example.com"
+```
+
+Note: non-browser clients (no `Origin` header) always bypass this check by design, as they
+cannot perform cross-site WebSocket hijacking. The allowlist only constrains browser clients.
+
+### JWT Secret and Audit-Log HMAC Key — Development and Pod Restarts
+
+The auto-generated dev secrets (`CHANGE_ME_IN_PRODUCTION_*`) are stable within a single
+process run but rotate on every process restart (pod restart, crash-loop, rolling deploy).
+
+This means:
+- Previously issued JWTs are invalid after a restart (no persistent session state in dev anyway)
+- Audit log HMAC chain breaks across restarts — log entries before and after a restart cannot
+  be verified with a common key
+
+The startup guard (`secret_guard.go`) refuses to start with the default JWT secret **and**
+the default HMAC key unless `AEGIR_ALLOW_INSECURE_JWT_SECRET=true` is set.
+
+**Production deployments must set both:**
+
+```bash
+export JWT_SECRET="<strong-random-secret>"
+export LOG_HMAC_KEY="<strong-random-key>"
+```
+
+Or via `aegir.yaml`:
+```yaml
+auth:
+  jwt:
+    secret: "${JWT_SECRET}"
+logging:
+  hmac_key: "${LOG_HMAC_KEY}"
+```
 
 ---
 

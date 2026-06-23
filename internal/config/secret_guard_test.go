@@ -8,6 +8,14 @@ import (
 func cfgWithSecret(secret string) *Config {
 	c := &Config{}
 	c.Auth.JWT.Secret = secret
+	c.Logging.HMACKey = "f3a9c1e7b54d20986a1cdef0773b22aa9911ccef" // strong default so JWT tests don't fail on HMAC path
+	return c
+}
+
+func cfgWithHMACKey(jwtSecret, hmacKey string) *Config {
+	c := &Config{}
+	c.Auth.JWT.Secret = jwtSecret
+	c.Logging.HMACKey = hmacKey
 	return c
 }
 
@@ -58,6 +66,32 @@ func TestCheckProductionSecrets_OverrideAllowsWeak(t *testing.T) {
 	t.Setenv(InsecureSecretsAllowedEnv, "true")
 	if err := CheckProductionSecrets(cfgWithSecret("simple-dev-key-change-for-production")); err != nil {
 		t.Fatalf("override env should downgrade to warning and allow startup, got error: %v", err)
+	}
+}
+
+func TestCheckProductionSecrets_HMACKeyGuarded(t *testing.T) {
+	t.Setenv(InsecureSecretsAllowedEnv, "")
+	strongJWT := "f3a9c1e7b54d20986a1cdef0773b22aa9911ccef"
+
+	weak := []struct {
+		name, hmacKey string
+	}{
+		{"empty hmac key", ""},
+		{"placeholder hmac key", "CHANGE_ME_IN_PRODUCTION_abc123"},
+		{"short hmac key", "tooshort"},
+	}
+	for _, tc := range weak {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := CheckProductionSecrets(cfgWithHMACKey(strongJWT, tc.hmacKey)); err == nil {
+				t.Fatalf("expected guard to REJECT HMAC key %q, but it passed", tc.hmacKey)
+			}
+		})
+	}
+
+	// Strong HMAC key should be accepted.
+	strong := cfgWithHMACKey(strongJWT, "d4a9c1e7b54d20986a1cdef0773b22aa9911beef")
+	if err := CheckProductionSecrets(strong); err != nil {
+		t.Fatalf("expected guard to ACCEPT strong HMAC key, got error: %v", err)
 	}
 }
 

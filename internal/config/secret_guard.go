@@ -46,33 +46,52 @@ var weakJWTSecretMarkers = []string{
 	"example-secret",
 }
 
-// CheckProductionSecrets fails closed when the configured JWT signing secret is
-// empty, a known dev/placeholder value, or too short — unless the operator has
-// explicitly opted into insecure secrets via AEGIR_ALLOW_INSECURE_JWT_SECRET, in
-// which case it warns loudly and allows startup. Intended to be called once at
-// server startup, before any transport begins serving. Tests do not run main()
-// and so are unaffected.
+// CheckProductionSecrets fails closed when either the JWT signing secret or the
+// audit-log HMAC key is empty, a known dev/placeholder value, or too short —
+// unless the operator has explicitly opted into insecure secrets via
+// AEGIR_ALLOW_INSECURE_JWT_SECRET, in which case it warns loudly and allows
+// startup. Intended to be called once at server startup, before any transport
+// begins serving. Tests do not run main() and are unaffected.
 func CheckProductionSecrets(cfg *Config) error {
-	reason := jwtSecretWeakness(cfg.Auth.JWT.Secret)
-	if reason == "" {
+	jwtReason := jwtSecretWeakness(cfg.Auth.JWT.Secret)
+	hmacReason := jwtSecretWeakness(cfg.Logging.HMACKey)
+
+	if jwtReason == "" && hmacReason == "" {
 		return nil
 	}
 
 	if isTruthyEnv(os.Getenv(InsecureSecretsAllowedEnv)) {
-		fmt.Fprintf(os.Stderr,
-			"\n*** SECURITY WARNING ***\n"+
-				"Aegir is starting with an INSECURE JWT signing secret (%s) because %s is set.\n"+
-				"Anyone who knows this secret can forge admin tokens. NEVER do this in production.\n"+
-				"Set a strong AUTH_JWT_SECRET (>= %d random chars) before deploying.\n\n",
-			reason, InsecureSecretsAllowedEnv, minJWTSecretLen)
+		if jwtReason != "" {
+			fmt.Fprintf(os.Stderr,
+				"\n*** SECURITY WARNING ***\n"+
+					"Aegir is starting with an INSECURE JWT signing secret (%s) because %s is set.\n"+
+					"Anyone who knows this secret can forge admin tokens. NEVER do this in production.\n"+
+					"Set a strong JWT_SECRET (>= %d random chars) before deploying.\n\n",
+				jwtReason, InsecureSecretsAllowedEnv, minJWTSecretLen)
+		}
+		if hmacReason != "" {
+			fmt.Fprintf(os.Stderr,
+				"\n*** SECURITY WARNING ***\n"+
+					"Aegir is starting with an INSECURE audit-log HMAC key (%s) because %s is set.\n"+
+					"Audit log integrity cannot be verified across restarts. NEVER do this in production.\n"+
+					"Set a stable LOG_HMAC_KEY (>= %d random chars) before deploying.\n\n",
+				hmacReason, InsecureSecretsAllowedEnv, minJWTSecretLen)
+		}
 		return nil
 	}
 
+	if jwtReason != "" {
+		return fmt.Errorf(
+			"refusing to start: JWT signing secret is %s — set a strong secret via the "+
+				"JWT_SECRET env var or auth.jwt.secret config (>= %d random chars), or set %s=1 "+
+				"to override for LOCAL DEV ONLY",
+			jwtReason, minJWTSecretLen, InsecureSecretsAllowedEnv)
+	}
 	return fmt.Errorf(
-		"refusing to start: JWT signing secret is %s — set a strong secret via the "+
-			"JWT_SECRET env var or auth.jwt.secret config (>= %d random chars), or set %s=1 "+
+		"refusing to start: audit-log HMAC key is %s — set a stable key via the "+
+			"LOG_HMAC_KEY env var or logging.hmac_key config (>= %d random chars), or set %s=1 "+
 			"to override for LOCAL DEV ONLY",
-		reason, minJWTSecretLen, InsecureSecretsAllowedEnv)
+		hmacReason, minJWTSecretLen, InsecureSecretsAllowedEnv)
 }
 
 // jwtSecretWeakness returns a human-readable reason the secret is unacceptable,
