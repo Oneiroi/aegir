@@ -2,7 +2,7 @@
 
 The Model Context Protocol has no security model. Authentication, content inspection, and threat detection are entirely absent from the specification. MCP is being deployed at scale — in production AI copilots, internal agentic workflows, and enterprise integrations — and the assumption is that security is someone else's problem.
 
-Aegir is that problem's solution. It's a drop-in transport-layer proxy that sits between any MCP client and your MCP server, enforcing enterprise-grade authentication, applying MITRE ATLAS-mapped threat detection, performing compliance redaction, and holding suspicious traffic for LLM judge evaluation — all without trusting the model to protect itself.
+Aegir is that problem's solution. It's a drop-in transport-layer proxy that sits between any MCP client and your MCP server, enforcing enterprise-grade authentication, applying MITRE ATLAS-mapped threat detection, performing compliance redaction, and routing suspicious traffic through an inline LLM judge — all without trusting the model to protect itself.
 
 **The ceiling is honest:** pattern-based detection at the transport layer covers approximately 62% of the MITRE ATLAS technique surface for MCP deployments. The remaining 38% requires semantic analysis above the regex layer. We document exactly what's covered, what's partial, and what isn't covered. See [`SCOPE.md`](SCOPE.md) and [`aegir-scope.json`](aegir-scope.json).
 
@@ -18,7 +18,7 @@ MCP tool calls are an unvalidated attack surface. Three confirmed attack paths a
 
 **Indirect Prompt Injection via Tool Results** — Content returned by upstream tool calls flows back into model context. Malicious instructions embedded in a database response, fetched document, or API reply execute with full system prompt authority. Pattern matching at the proxy layer does not catch this without inspecting tool result content.
 
-Aegir blocks SSRF via tool argument validation, implements configurable anomaly detection for payload entropy and encoding attacks, and routes suspicious traffic to the LLM judge layer (M009) for the semantic attacks pattern matching cannot reach.
+Aegir mitigates path 1 (SSRF) via parse-time tool-argument URL validation — note that DNS rebinding is not covered at parse time; see [`SECURITY.md`](SECURITY.md). Path 2 (DNS rebinding) is an open gap requiring network-level egress controls. Path 3 (indirect injection via tool results) is an open gap — the inline judge is the intended mechanism, but tool-result content inspection is not yet wired (ISC-22). Anomaly detection is active for encoding-based evasion and high-entropy payloads.
 
 ---
 
@@ -34,10 +34,10 @@ Aegir's detection is mapped against the MITRE ATLAS framework for ML attacks. Fu
 | AML.T0054.001–.006 — Jailbreak variants | implemented | IOC patterns + anomaly scoring |
 | AML.T0054.007 — Crescendo | planned | Requires LLM judge layer (M009) — above transport ceiling |
 | AML.T0057 — LLM Data Leakage | partial | Response compliance scan active; extended secret patterns pending |
-| AML.T0012 — Valid Accounts | implemented | JWT + OAuth2 + API key + phishing-resistant WebAuthn/FIDO2 MFA |
+| AML.T0012 — Valid Accounts | implemented | JWT + OAuth2 + API key (MCP data path); WebAuthn/FIDO2 MFA (admin management interface) |
 | AML.T0022 — Denial of ML Service | implemented | Per-identity rate limiting, bounded tracking map |
 
-The 62% ceiling is not a failure — it's an honest accounting of what a transport-layer proxy can and cannot do. Crescendo attacks, distributed model extraction, and RAG poisoning require semantic understanding above the pattern-matching layer. The LLM judge layer (M009) handles exactly this.
+The 62% ceiling is not a failure — it's an honest accounting of what a transport-layer proxy can and cannot do. Crescendo attacks, distributed model extraction, and RAG poisoning require semantic understanding above the pattern-matching layer. The inline LLM judge (M009) provides that capability for single-request semantic attacks. Indirect prompt injection via tool results (ISC-22) and session-level Crescendo detection (ISC-52) are in progress.
 
 ---
 
@@ -52,10 +52,10 @@ MCP Client → Aegir proxy → upstream MCP server
                 ├─ Anomaly scoring (Shannon entropy, non-ASCII ratio)
                 ├─ Compliance redaction (GDPR/HIPAA/PCI)
                 ├─ HMAC-protected audit log
-                └─ LLM judge (M009, async hold-and-decide — Ollama local default)
+                └─ LLM judge (M009, synchronous inline — SUSPICIOUS traffic only)
 ```
 
-Fail-closed by design: judge timeout → BLOCK, never ALLOW. Clean traffic takes the non-judge path. Latency budget for the non-judge path: <10ms p99.
+Fail-closed by design: judge timeout → BLOCK, never ALLOW. Clean traffic takes the non-judge path (no judge invocation, <10ms p99). Suspicious traffic incurs synchronous judge latency on the request path — the client blocks until the verdict returns.
 
 Local-first: the default judge backend is Ollama. MCP payloads may contain sensitive data. They do not leave your perimeter by default. API-hosted models (Anthropic, OpenAI-compatible) are explicit opt-in.
 

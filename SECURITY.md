@@ -55,6 +55,24 @@ sessions so the rate limiter operates on an authenticated identity, not an IP.
 
 **Fix planned:** v0.x — rate-limit key hashing + `trusted_proxies` configuration.
 
+### DNS Rebinding Bypass (Open — BUG-2)
+
+Aegir validates resource URIs and tool-argument URLs at URL parse time. DNS resolves at TCP
+connection time. An attacker-controlled hostname (`attacker.example.com`) may pass parse-time
+validation, then resolve to an internal IP address (`192.168.1.1`) at connection time, bypassing
+all blocklist enforcement.
+
+This is a known open gap. Parse-time SSRF detection (SSRF.001–004, AWS IMDS URL blocking,
+`validateResourceURI`) is **not protection against DNS rebinding**.
+
+**Mitigation:** Deploy a network-level egress filter (firewall, no-route to RFC1918 from the
+proxy host) that blocks internal IP connections independently of the application layer. DNS
+rebinding cannot be fully mitigated at the application level without connection-time IP
+re-validation, which is planned.
+
+**Fix planned:** Custom `DialContext` on the upstream HTTP transport to re-validate the
+resolved IP at connection time (ISC-1).
+
 ### SSRF Dual-Implementation
 
 Server-Side Request Forgery detection has two independent implementations:
@@ -62,12 +80,30 @@ Server-Side Request Forgery detection has two independent implementations:
 - Structural URI validation in `internal/server/mcp_proxy.go` (`validateResourceURI`, `isSSRFTarget`)
 
 These are not identical in coverage. Future changes that update one but not the other risk
-introducing coverage gaps. DNS rebinding is explicitly not covered.
+introducing coverage gaps.
 
 **Mitigation:** Run Aegir behind a network-level egress filter that enforces the same URI
 restrictions independently of the application layer.
 
 **Fix planned:** Consolidate to a single structural validation path in v0.x.
+
+### Indirect Prompt Injection via Tool Results (Open — ISC-22)
+
+Content returned by upstream tool calls — fetched documents, database responses, API replies —
+flows back to the MCP client as tool result data. If that content contains injected directives
+(e.g. "Ignore previous instructions and..."), those directives reach the model's context
+without inspection.
+
+Aegir currently inspects inbound requests. Tool result content (the response path from upstream
+back to the model) is sanitized for PII/PHI/PCI and secrets, but is not yet scanned by the
+full prompt-injection detection suite before forwarding.
+
+**Mitigation:** Treat all upstream tool sources as untrusted data sources. Restrict tool scope
+to read-only where possible. Monitor the audit log for high-frequency SUSPICIOUS flags on
+the same session as a potential indicator of indirect injection attempts.
+
+**Fix in progress:** Tool-result scanning will apply the full detection suite to upstream
+content before it reaches the model context (ISC-22, M008/M009 scope).
 
 ### SSE Transport (Server-Sent Events)
 
