@@ -97,15 +97,19 @@ bench:
 # Latency benchmark with redteam attack catalog (local only, not committed)
 # Usage: just bench-redteam
 bench-redteam:
+    #!/usr/bin/env bash
+    python3 -c "
+import yaml
+cat = yaml.safe_load(open('redteam/aegir/attack_catalog.yaml'))
+for a in cat.get('attacks', []):
+    if a.get('payload'):
+        print(a['payload'])
+" > /tmp/aegir-bench-payloads.txt
     go run ./benchmark \
         --target https://localhost:8443 \
         --insecure \
         --judge-provider "${AEGIR_BENCH_JUDGE:-ollama}" \
-        --payload-file <(python3 -c " \
-            import yaml, sys; \
-            cat = yaml.safe_load(open('redteam/aegir/attack_catalog.yaml')); \
-            [print(a['payload']) for a in cat.get('attacks', []) if a.get('payload')] \
-        ")
+        --payload-file /tmp/aegir-bench-payloads.txt
 
 # Latency benchmark with custom payload file
 # Usage: just bench-file PAYLOADS=/path/to/payloads.txt
