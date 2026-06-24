@@ -1,21 +1,21 @@
 {
   "version": "1.0",
-  "generated": "2026-06-02",
+  "generated": "2026-06-24",
   "transport_layer_ceiling_percent": 62,
   "atlas_techniques": [
     {
       "id": "AML.T0012",
       "name": "Valid Accounts",
-      "status": "partial",
-      "mechanism": "JWT + OAuth2 + API key auth enforced; WebAuthn/FIDO2 MFA planned (ISC-4 through ISC-6.1)",
-      "notes": "Auth layer present and active (ISC-66 confirmed). Phishing-resistant MFA not yet implemented — registration and assertion ceremonies missing. Single-factor credential compromise = full access until WebAuthn lands."
+      "status": "implemented",
+      "mechanism": "JWT + OAuth2 + API key auth enforced on MCP data path; WebAuthn/FIDO2 MFA on admin management interface (M007)",
+      "notes": "Auth layer active for all MCP traffic. WebAuthn/FIDO2 MFA shipped M007 for admin dashboard. MCP data path uses JWT/API key — MFA applies to the management plane, not per-request MCP sessions."
     },
     {
       "id": "AML.T0022",
       "name": "Denial of ML Service",
-      "status": "partial",
-      "mechanism": "Per-IP rate limiting with LRU cap at max_tracked_ips",
-      "notes": "Memory-bounded rate limiter implemented (ISC-2, ISC-3 implementations correct; probe test names need renaming). Per-user identity rate limiting not yet implemented (ISC-14) — distributed botnet across many IPs bypasses per-IP gate."
+      "status": "implemented",
+      "mechanism": "Per-identity rate limiting (JWT subject / API-key keyed, LRU-bounded) shipped M007; per-IP fallback for unauthenticated sessions",
+      "notes": "Identity-keyed rate limiting shipped M007 — authenticated requests bucketed by JWT subject / API key, not IP. LRU cap prevents unbounded memory growth under IP rotation. Unauthenticated sessions fall back to per-IP bucket (spoofable via X-Forwarded-For behind proxies — see SECURITY.md)."
     },
     {
       "id": "AML.T0050",
@@ -83,9 +83,9 @@
     {
       "id": "AML.T0056",
       "name": "Meta Prompt Extraction",
-      "status": "planned",
-      "mechanism": "Pure extraction patterns (no override verb required) planned in M008 (ISC-25)",
-      "notes": "'what are your instructions verbatim' class patterns not yet active. Planned in M008."
+      "status": "implemented",
+      "mechanism": "Pure extraction patterns (no override verb required) shipped M008 (ISC-25); system prompt override patterns active from M001",
+      "notes": "'what are your instructions verbatim' class patterns active. Both override-verb and pure-extraction variants covered."
     },
     {
       "id": "AML.T0057",
@@ -118,9 +118,9 @@
     {
       "id": "POLY.003",
       "name": "Leet Speak Bypass",
-      "status": "planned",
-      "mechanism": "Leet normalisation pass before pattern matching (M008, ISC-24, ISC-59)",
-      "notes": "Not yet active. ign0re all pr3v1ous 1nstruct1ons not yet caught. Planned in M008."
+      "status": "implemented",
+      "mechanism": "Leet normalisation pass before pattern matching shipped M008 (ISC-24, ISC-59)",
+      "notes": "Active. ign0re all pr3v1ous 1nstruct1ons class patterns caught via pre-normalisation before Aho-Corasick trie."
     }
   ],
   "not_covered": [
@@ -130,10 +130,8 @@
     "Cross-deployment infrastructure correlation",
     "SIEM functionality — Aegir produces audit logs suitable for SIEM ingestion; it is not a SIEM",
     "The LLM judge's training or alignment — Aegir consumes a judge API/binary; it does not train one",
-    "Crescendo (AML.T0054.007) and distributed model extraction until M009 judge layer is implemented",
-    "Indirect prompt injection via tool results until M008",
-    "Leet-speak evasion variants until M008",
-    "WebAuthn/FIDO2 MFA until M007",
+    "Crescendo (AML.T0054.007) and session-level distributed model extraction — LLM judge (M009) handles single-turn semantic attacks but lacks cross-request session context for Crescendo detection (ISC-52 open)",
+    "Indirect prompt injection via tool results — tool result scanning against full IOC suite pending (ISC-22 open)",
     "NHI lifecycle management",
     "Network segmentation and process-level least privilege",
     "Confused Deputy attacks",

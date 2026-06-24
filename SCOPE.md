@@ -17,7 +17,7 @@ Aegir is a **necessary first layer**, not a sufficient one. This document states
 
 ## Transport-Layer Coverage Ceiling
 
-Pattern-based detection at the transport layer has a **hard ceiling of approximately 62% MITRE ATLAS coverage**. The remaining ~38% requires semantic and behavioural analysis that cannot be done at the regex/trie level — specifically:
+Pattern-based detection at the transport layer has a **hard ceiling of approximately 62% of in-scope MITRE ATLAS techniques for an MCP transport-layer proxy** (the denominator is the technique surface addressable at this layer — not the full ATLAS corpus, which includes training-pipeline, supply-chain, and infrastructure techniques structurally out of scope for a runtime proxy). The remaining ~38% requires semantic and behavioural analysis that cannot be done at the regex/trie level — specifically:
 
 - **Crescendo (AML.T0054.007):** Slow multi-turn escalation without explicit keywords. No individual message triggers detection; only the session-level pattern does.
 - **Indirect injection via tool results:** Injected directives embedded in upstream tool call response bodies.
