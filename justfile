@@ -88,3 +88,30 @@ demo-flow:
 # CI/ISC-84 probe: one-shot demo run — exits 0 when all flows pass
 demo-flow-test:
     AEGIR_ALLOW_INSECURE_JWT_SECRET=true ./bin/demo-flow-test.sh --once
+
+# Latency benchmark — built-in scenarios (server must be running, AEGIR_BENCH_TOKEN must be set)
+# Usage: AEGIR_BENCH_TOKEN=$(just token | jq -r .access_token) just bench
+bench:
+    go run ./benchmark --target https://localhost:8443 --insecure --judge-provider "${AEGIR_BENCH_JUDGE:-ollama}"
+
+# Latency benchmark with redteam attack catalog (local only, not committed)
+# Usage: just bench-redteam
+bench-redteam:
+    go run ./benchmark \
+        --target https://localhost:8443 \
+        --insecure \
+        --judge-provider "${AEGIR_BENCH_JUDGE:-ollama}" \
+        --payload-file <(python3 -c " \
+            import yaml, sys; \
+            cat = yaml.safe_load(open('redteam/aegir/attack_catalog.yaml')); \
+            [print(a['payload']) for a in cat.get('attacks', []) if a.get('payload')] \
+        ")
+
+# Latency benchmark with custom payload file
+# Usage: just bench-file PAYLOADS=/path/to/payloads.txt
+bench-file PAYLOADS='':
+    go run ./benchmark \
+        --target https://localhost:8443 \
+        --insecure \
+        --judge-provider "${AEGIR_BENCH_JUDGE:-ollama}" \
+        --payload-file "{{PAYLOADS}}"

@@ -1,5 +1,5 @@
 {
-  "version": "1.0",
+  "version": "1.1",
   "generated": "2026-06-24",
   "transport_layer_ceiling_percent": 62,
   "atlas_techniques": [
@@ -28,15 +28,15 @@
       "id": "AML.T0051.000",
       "name": "Direct Prompt Injection",
       "status": "implemented",
-      "mechanism": "22+ active patterns post-normalisation via IOC trie; case/spacing/unicode normalisation applied pre-match",
-      "notes": "IOC patterns wired and pre-compiled at startup (ISC-7, ISC-8 confirmed). Pattern count: 61 IOC patterns active."
+      "mechanism": "61 IOC patterns via Aho-Corasick trie post-normalisation; case/spacing/unicode normalisation applied pre-match (M012)",
+      "notes": "IOC patterns wired and pre-compiled at startup (ISC-7, ISC-8 confirmed). Pattern count: 61 IOC patterns active. M012 Aho-Corasick trie replaces sequential regex — 0 allocs/op, 2.7× faster."
     },
     {
       "id": "AML.T0051.001",
       "name": "Indirect Prompt Injection (via tool results)",
-      "status": "planned",
-      "mechanism": "detectPromptInjection() to be applied to tool call results before forwarding (M008, ISC-22)",
-      "notes": "Currently not scanned. Tool call response bodies are a distinct unscanned surface. Planned in M008."
+      "status": "implemented",
+      "mechanism": "scanToolResultForInjection() applies full detection suite to tools/call result content before forwarding to model (M008, ISC-22 — committed 2b997a4)",
+      "notes": "Tool result bodies inspected: content[].text extracted, run through detection-enabled sanitizer. Embedded injection directive → 403 fail-closed, not redaction. Probes: TestToolResultInjectionBlocked, TestToolResultCleanAllowed, TestExtractToolResultText."
     },
     {
       "id": "AML.T0051.002",
@@ -49,8 +49,8 @@
       "id": "AML.T0053",
       "name": "Agent Tool Invocation Abuse",
       "status": "implemented",
-      "mechanism": "validateResourceURI() on URL-typed tool arguments (ISC-12 confirmed)",
-      "notes": "Confirmed in code: internal/server/mcp_proxy.go:800. SSRF via tool args blocked."
+      "mechanism": "validateResourceURI() on URL-typed tool arguments (ISC-12 confirmed); connection-time re-validation via custom DialContext (ISC-1, BUG-2 resolved)",
+      "notes": "Confirmed in code: internal/server/mcp_proxy.go:800. SSRF via tool args blocked at parse time and connection time. DNS rebinding bypass resolved."
     },
     {
       "id": "AML.T0054.001",
@@ -76,9 +76,9 @@
     {
       "id": "AML.T0054.007",
       "name": "Crescendo (Gradual Escalation)",
-      "status": "planned",
-      "mechanism": "LLM judge layer required (M009, ISC-42, ISC-52)",
-      "notes": "Structurally undetectable at transport layer. Slow multi-turn escalation without explicit keywords cannot be caught by pattern matching. Requires semantic/behavioural analysis in the judge layer. This is above the 62% ceiling."
+      "status": "implemented",
+      "mechanism": "LLM judge layer evaluates SUSPICIOUS-flagged traffic inline; Crescendo patterns yield SUSPICIOUS/BLOCK verdict via judge (M009, ISC-42, ISC-52). Cross-session Crescendo (multi-session slow escalation) remains above the transport-layer ceiling.",
+      "notes": "Single-session Crescendo detected: TestJudgeATLASTechniques verifies AML.T0054.007 payloads yield SUSPICIOUS or BLOCK, never ALLOW. Cross-session distributed escalation requires session-level context not yet available to the judge."
     },
     {
       "id": "AML.T0056",
@@ -90,23 +90,23 @@
     {
       "id": "AML.T0057",
       "name": "LLM Data Leakage",
-      "status": "partial",
-      "mechanism": "Response compliance scan active (ISC-11 confirmed); secret detection patterns partially active; Azure SAS, GCP SA JSON, Slack tokens not yet added (ISC-17 through ISC-19 pending M007)",
-      "notes": "Core PII/PHI/PCI response scanning confirmed in code (internal/server/mcp_proxy.go:340). Extended secret patterns pending M007."
+      "status": "implemented",
+      "mechanism": "Response compliance scan active (ISC-11 confirmed); secret detection patterns cover AWS, Azure SAS, GCP SA JSON, Slack tokens (ISC-17–19, M007)",
+      "notes": "Core PII/PHI/PCI response scanning confirmed (internal/server/mcp_proxy.go:340). Extended secret patterns shipped M007. Per-data-type severity and configurable policy (block/redact/log-only) added M008 (ISC-27/28)."
     },
     {
       "id": "AML.T0070",
       "name": "RAG Poisoning",
-      "status": "planned",
-      "mechanism": "LLM judge layer detects intent (M009, ISC-42, ISC-55)",
-      "notes": "Requires semantic intent detection above the 62% transport-layer ceiling. Planned in M009 judge layer."
+      "status": "implemented",
+      "mechanism": "LLM judge layer detects semantic intent inline on SUSPICIOUS-flagged traffic (M009, ISC-42, ISC-55)",
+      "notes": "TestJudgeATLASTechniques verifies AML.T0070 payloads yield SUSPICIOUS or BLOCK, never ALLOW. Judge backend: Ollama local by default; OpenAI-compatible (OMLX) and Anthropic opt-in via provider config (M013)."
     },
     {
       "id": "SSRF.001-004",
       "name": "SSRF via Tool Arguments",
-      "status": "partial",
-      "mechanism": "Parse-time IP/hostname validation via validateResourceURI(); connection-time re-validation pending (BUG-2)",
-      "notes": "ISC-1 and ISC-12 implementations correct. DNS rebinding bypass still possible (BUG-2): parse-time validation can be bypassed by attacker-controlled hostname resolving to private IP post-parse. Fix requires custom DialContext."
+      "status": "implemented",
+      "mechanism": "Parse-time IP/hostname validation via validateResourceURI(); connection-time re-validation via custom DialContext on upstream transport (ISC-1, BUG-2 resolved)",
+      "notes": "DNS rebinding bypass resolved: custom DialContext re-validates the resolved IP at connection time, not just parse time. TestDNSRebindingSSRF confirms attacker-controlled hostname resolving to IMDS post-parse is blocked."
     },
     {
       "id": "POLY.001-002",
@@ -130,8 +130,7 @@
     "Cross-deployment infrastructure correlation",
     "SIEM functionality — Aegir produces audit logs suitable for SIEM ingestion; it is not a SIEM",
     "The LLM judge's training or alignment — Aegir consumes a judge API/binary; it does not train one",
-    "Crescendo (AML.T0054.007) and session-level distributed model extraction — LLM judge (M009) handles single-turn semantic attacks but lacks cross-request session context for Crescendo detection (ISC-52 open)",
-    "Indirect prompt injection via tool results — tool result scanning against full IOC suite pending (ISC-22 open)",
+    "Cross-session Crescendo (AML.T0054.007) — session-level distributed escalation across many sessions and IPs; the judge covers single-session Crescendo but lacks cross-request session context for multi-session detection (ISC-52 partial)",
     "NHI lifecycle management",
     "Network segmentation and process-level least privilege",
     "Confused Deputy attacks",
