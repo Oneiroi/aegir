@@ -4,18 +4,31 @@ Measures end-to-end p50/p95/p99 latency through a live Aegir instance across fou
 
 ## Quick start
 
-```bash
-# 1. Start Aegir (in another terminal)
-just run
+Aegir generates a random admin password at startup unless `AEGIR_ADMIN_PASSWORD` is set. Use the env var for repeatable local dev:
 
-# 2. Get a bearer token
-TOKEN=$(curl -sk -X POST https://localhost:8443/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"<your-admin-password>"}' \
-  | jq -r .access_token)
+```bash
+# 1. Start Aegir with a fixed dev password (in another terminal)
+AEGIR_ADMIN_PASSWORD=admin123 just run
+
+# 2. Fetch a bearer token (just token uses admin123 by default)
+export AEGIR_BENCH_TOKEN=$(just token | jq -r .access_token)
 
 # 3. Run the built-in benchmark
-AEGIR_BENCH_TOKEN=$TOKEN just bench
+just bench
+```
+
+If Aegir is already running without `AEGIR_ADMIN_PASSWORD` set, get the password from the startup log:
+
+```bash
+# The password was printed to stderr on startup:
+#   [AEGIR STARTUP] Admin password (save this): <generated-password>
+
+export AEGIR_BENCH_TOKEN=$(curl -sk -X POST https://localhost:8443/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"<password-from-startup-log>"}' \
+  | jq -r .access_token)
+
+just bench
 ```
 
 ## Scenario categories

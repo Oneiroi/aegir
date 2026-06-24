@@ -68,10 +68,13 @@ certs-force:
         -subj "/C=US/ST=CA/L=SF/O=Aegir/CN=localhost"
 
 # Fetch a default admin JWT (server must be running on :8443)
+# Requires Aegir started with AEGIR_ADMIN_PASSWORD=admin123 (or set AEGIR_ADMIN_PASSWORD to match startup log)
 token:
-    curl -k -X POST https://localhost:8443/auth/login \
+    #!/usr/bin/env bash
+    PASSWORD="${AEGIR_ADMIN_PASSWORD:-admin123}"
+    curl -sk -X POST https://localhost:8443/auth/login \
         -H "Content-Type: application/json" \
-        -d '{"username": "admin", "password": "admin123"}'
+        -d "{\"username\": \"admin\", \"password\": \"$PASSWORD\"}"
 
 # Build the MCP echo server (benign upstream for red-team testing)
 build-echo:
@@ -97,7 +100,7 @@ bench:
 # Latency benchmark against local corpus files (redteam/aegir/*.jsonl, not committed)
 # Falls back to benign_corpus.jsonl if adversarial.jsonl hasn't been generated yet.
 # To generate adversarial.jsonl first: cd redteam/aegir && python3 harvest.py
-# Usage: just bench-redteam
+# Usage: AEGIR_BENCH_TOKEN=$(just token | jq -r .access_token) just bench-redteam
 bench-redteam:
     #!/usr/bin/env bash
     set -e
