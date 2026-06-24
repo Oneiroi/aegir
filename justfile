@@ -94,11 +94,20 @@ demo-flow-test:
 bench:
     go run ./benchmark --target https://localhost:8443 --insecure --judge-provider "${AEGIR_BENCH_JUDGE:-ollama}"
 
-# Latency benchmark with redteam attack catalog (local only, not committed)
+# Latency benchmark against local corpus files (redteam/aegir/*.jsonl, not committed)
+# Falls back to benign_corpus.jsonl if adversarial.jsonl hasn't been generated yet.
+# To generate adversarial.jsonl first: cd redteam/aegir && python3 harvest.py
 # Usage: just bench-redteam
 bench-redteam:
-    python3 -c "import yaml; [print(a['payload']) for a in yaml.safe_load(open('redteam/aegir/attack_catalog.yaml')).get('attacks',[]) if a.get('payload')]" > /tmp/aegir-bench-payloads.txt
-    go run ./benchmark --target https://localhost:8443 --insecure --judge-provider "${AEGIR_BENCH_JUDGE:-ollama}" --payload-file /tmp/aegir-bench-payloads.txt
+    #!/usr/bin/env bash
+    set -e
+    if [ -f redteam/aegir/corpus/adversarial.jsonl ]; then
+        CORPUS=redteam/aegir/corpus/adversarial.jsonl
+    else
+        echo "No adversarial corpus found — using benign_corpus.jsonl (run harvest.py to generate attack corpus)"
+        CORPUS=redteam/aegir/benign_corpus.jsonl
+    fi
+    go run ./benchmark --target https://localhost:8443 --insecure --judge-provider "${AEGIR_BENCH_JUDGE:-ollama}" --payload-file "$CORPUS"
 
 # Latency benchmark with custom payload file
 # Usage: just bench-file PAYLOADS=/path/to/payloads.txt

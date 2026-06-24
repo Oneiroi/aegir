@@ -181,34 +181,60 @@ func send(client *http.Client, target, token, payload string) reqResult {
 	return reqResult{latency: lat, status: status}
 }
 
+// corpusEntry matches the JSONL format produced by harvest.py and benign_corpus.jsonl.
+type corpusEntry struct {
+	ID           string `json:"id"`
+	Payload      string `json:"payload"`
+	AttackModule string `json:"attack_module"`
+	OWASP        string `json:"owasp"`
+}
+
 func loadScenarios(payloadFile string) []scenario {
 	if payloadFile != "" {
-		f, err := os.Open(payloadFile)
-		if err == nil {
-			defer f.Close()
-			var out []scenario
-			sc := bufio.NewScanner(f)
-			i := 0
-			for sc.Scan() {
-				line := strings.TrimSpace(sc.Text())
-				if line == "" || strings.HasPrefix(line, "#") {
-					continue
-				}
-				i++
-				out = append(out, scenario{
-					category: "custom",
-					name:     fmt.Sprintf("custom/%d", i),
-					payload:  line,
-				})
-			}
-			if len(out) > 0 {
-				fmt.Printf("Loaded %d payloads from %s\n\n", len(out), payloadFile)
-				return out
-			}
+		if out := loadFile(payloadFile); len(out) > 0 {
+			fmt.Printf("Loaded %d payloads from %s\n\n", len(out), payloadFile)
+			return out
 		}
 	}
 	fmt.Printf("Using built-in representative scenarios\n\n")
 	return builtInScenarios()
+}
+
+func loadFile(path string) []scenario {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	var out []scenario
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 1<<20), 1<<20) // 1 MiB per line for long payloads
+	i := 0
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		i++
+		// Try JSONL corpus format first (has "payload" field).
+		var entry corpusEntry
+		if err := json.Unmarshal([]byte(line), &entry); err == nil && entry.Payload != "" {
+			cat := entry.AttackModule
+			if cat == "" {
+				cat = "custom"
+			}
+			id := entry.ID
+			if id == "" {
+				id = fmt.Sprintf("%d", i)
+			}
+			out = append(out, scenario{category: cat, name: cat + "/" + id, payload: entry.Payload})
+			continue
+		}
+		// Fall back to plain-text: one payload per line.
+		out = append(out, scenario{category: "custom", name: fmt.Sprintf("custom/%d", i), payload: line})
+	}
+	return out
 }
 
 func percentiles(sorted []time.Duration) (p50, p95, p99 time.Duration) {
