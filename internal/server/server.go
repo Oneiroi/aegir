@@ -432,14 +432,60 @@ func (s *MCPFirewall) loggingMiddleware() gin.HandlerFunc {
 	})
 }
 
-// Health check handler
+// Health check handler — returns aliveness status and basic metrics.
+// No sensitive internals (key IDs, HMAC status) — those live behind auth at /api/dashboard/health.
 func (s *MCPFirewall) healthCheck(c *gin.Context) {
-	// Deliberately minimal: no version or timestamp. The /health endpoint is
-	// unauthenticated, so leaking build version/uptime here aids fingerprinting
-	// for no operational benefit (internal callers use /api/dashboard/health).
-	c.JSON(http.StatusOK, gin.H{
-		"status": "healthy",
-	})
+	status := "healthy"
+	var alerts []string
+
+	if s.dashboardStats != nil {
+		d := s.dashboardStats.GetDashboard()
+
+		if d.SystemStats.MemoryPercent > 80 {
+			status = "degraded"
+			alerts = append(alerts, "high memory usage")
+		}
+		if d.SystemStats.GoroutineCount > 1000 {
+			if status == "healthy" {
+				status = "degraded"
+			}
+			alerts = append(alerts, "high goroutine count")
+		}
+		if d.AverageRequestTime > 5*time.Second {
+			if status == "healthy" {
+				status = "degraded"
+			}
+			alerts = append(alerts, "slow response times")
+		}
+
+		oneMinuteAgo := time.Now().Add(-time.Minute)
+		var recentAttacks uint64
+		for _, req := range d.RecentRequests {
+			if req.StartTime.After(oneMinuteAgo) {
+				recentAttacks += uint64(len(req.AttacksFound))
+			}
+		}
+		if recentAttacks > 100 {
+			status = "unhealthy"
+			alerts = append(alerts, "high attack rate")
+		}
+
+		httpCode := http.StatusOK
+		if status != "healthy" {
+			httpCode = http.StatusServiceUnavailable
+		}
+		c.JSON(httpCode, gin.H{
+			"status":          status,
+			"uptime":          d.Uptime,
+			"requests_total":  d.TotalRequests,
+			"attacks_blocked": d.TotalAttacksBlocked,
+			"active_requests": d.ActiveRequests,
+			"alerts":          alerts,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": status})
 }
 
 // Logging status handler
