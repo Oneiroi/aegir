@@ -20,6 +20,19 @@ run-stdio: build
 run-sse: build certs
     AEGIR_ALLOW_INSECURE_JWT_SECRET=true ./bin/aegir -transport sse
 
+# Run with OMLX (Apple Silicon MLX) as the LLM judge backend.
+# OMLX must already be serving: omlx serve --port 8000
+# Judge config is Aegir-side via MCP_* Viper overrides (prefix "MCP", not "AEGIR").
+# Model override: OMLX_MODEL=gemma-4-31B-it-8bit just run-judge-omlx
+run-judge-omlx: build certs
+    #!/usr/bin/env bash
+    AEGIR_ALLOW_INSECURE_JWT_SECRET=true \
+    MCP_JUDGE_ENABLED=true \
+    MCP_JUDGE_PROVIDER=openai \
+    MCP_JUDGE_BASE_URL=http://localhost:8000/v1 \
+    MCP_JUDGE_MODEL="${OMLX_MODEL:-gemma-4-26B-A4B-it-8bit}" \
+    ./bin/aegir
+
 # Run from source (no build step)
 dev: certs
     AEGIR_ALLOW_INSECURE_JWT_SECRET=true go run ./cmd/server
@@ -93,13 +106,16 @@ demo-flow-test:
     AEGIR_ALLOW_INSECURE_JWT_SECRET=true ./bin/demo-flow-test.sh --once
 
 # Latency benchmark — built-in scenarios (server must be running, AEGIR_BENCH_TOKEN must be set)
-# Usage: AEGIR_BENCH_TOKEN=$(just token | jq -r .access_token) just bench
+# AEGIR_BENCH_JUDGE is a report label only — it does NOT configure which judge Aegir uses.
+# To benchmark with OMLX as judge: start Aegir via 'just run-judge-omlx' first, then run bench.
+# Usage: AEGIR_BENCH_TOKEN=$(just token | jq -r .access_token) [AEGIR_BENCH_JUDGE=omlx] just bench
 bench:
     go run ./benchmark --target https://localhost:8443 --insecure --judge-provider "${AEGIR_BENCH_JUDGE:-ollama}"
 
 # Latency benchmark against local corpus files (redteam/aegir/*.jsonl, not committed)
 # Falls back to benign_corpus.jsonl if adversarial.jsonl hasn't been generated yet.
 # To generate adversarial.jsonl first: cd redteam/aegir && python3 harvest.py
+# AEGIR_BENCH_JUDGE is a report label only — start Aegir via 'just run-judge-omlx' to actually use OMLX.
 # Usage: AEGIR_BENCH_TOKEN=$(just token | jq -r .access_token) just bench-redteam
 bench-redteam:
     #!/usr/bin/env bash

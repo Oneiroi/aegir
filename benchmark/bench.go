@@ -16,20 +16,20 @@
 //
 // Payload file (optional):
 //
-//	Each line is a raw text payload; the tool wraps it in a JSON-RPC tools/call
-//	envelope. Category defaults to "custom". Use the extract helper to pull
-//	payloads from the redteam attack catalog:
+//	Pass a JSONL corpus file or a plain-text file (one payload per line).
+//	JSONL format: {"id":"...","payload":"...","attack_module":"...","owasp":"..."}
 //
-//	  python3 -c "
-//	  import yaml, json, sys
-//	  cat = yaml.safe_load(open('redteam/aegir/attack_catalog.yaml'))
-//	  for a in cat.get('attacks', []):
-//	      if a.get('payload'): print(a['payload'])
-//	  " > /tmp/bench-payloads.txt
-//	  go run ./benchmark --payload-file /tmp/bench-payloads.txt
+//	  go run ./benchmark --payload-file redteam/aegir/benign_corpus.jsonl
+//	  go run ./benchmark --payload-file redteam/aegir/corpus/adversarial.jsonl
 //
-// Judge backend configuration is on the Aegir side (aegir.yaml), not here.
-// --judge-provider is a report label only.
+//	Generate adversarial.jsonl first: cd redteam/aegir && python3 harvest.py
+//
+// Judge backend:
+//
+//	Configuration is Aegir-side (aegir.yaml / MCP_JUDGE_* env vars), not here.
+//	--judge-provider is a report label only — it does NOT route to any backend.
+//	To actually run with OMLX as judge: start Aegir via 'just run-judge-omlx',
+//	then set AEGIR_BENCH_JUDGE=omlx for the report label.
 package main
 
 import (
@@ -233,6 +233,9 @@ func loadFile(path string) []scenario {
 		}
 		// Fall back to plain-text: one payload per line.
 		out = append(out, scenario{category: "custom", name: fmt.Sprintf("custom/%d", i), payload: line})
+	}
+	if err := sc.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: scanner error reading %s: %v\n", path, err)
 	}
 	return out
 }
