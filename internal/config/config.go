@@ -407,6 +407,26 @@ type RetryConfig struct {
 }
 
 // Load loads configuration from multiple sources with precedence:
+// bindJudgeEnv explicitly registers MCP_JUDGE_* → judge.* mappings on the
+// supplied Viper instance. This works around a long-standing Viper limitation
+// (github.com/spf13/viper#584) where Unmarshal ignores keys discovered solely
+// via AutomaticEnv — i.e. keys whose value is only in the environment and
+// absent from the config file and defaults cannot be unmarshalled.
+// BindEnv makes the mapping explicit and queryable by Unmarshal.
+func bindJudgeEnv(v *viper.Viper) {
+	pairs := [][2]string{
+		{"judge.enabled", "MCP_JUDGE_ENABLED"},
+		{"judge.provider", "MCP_JUDGE_PROVIDER"},
+		{"judge.base_url", "MCP_JUDGE_BASE_URL"},
+		{"judge.model", "MCP_JUDGE_MODEL"},
+		{"judge.api_key", "MCP_JUDGE_API_KEY"},
+		{"judge.timeout_ms", "MCP_JUDGE_TIMEOUT_MS"},
+	}
+	for _, p := range pairs {
+		_ = v.BindEnv(p[0], p[1])
+	}
+}
+
 // 1. Command line flags (highest priority)
 // 2. Environment variables
 // 3. Configuration files
@@ -449,6 +469,12 @@ func LoadWithConfigFile(configFile string) (*Config, error) {
 	v.AutomaticEnv()
 	v.SetEnvPrefix("MCP") // MCP_SERVER_PORT, etc.
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+
+	// Explicit BindEnv for runtime-critical keys: Viper's Unmarshal does not
+	// consult AutomaticEnv for keys whose values come solely from env vars
+	// (github.com/spf13/viper#584). BindEnv registers the mapping explicitly
+	// so Unmarshal can see it regardless of whether the key exists in the file.
+	bindJudgeEnv(v)
 
 	// Set default values first
 	setDefaults(v)
@@ -499,6 +525,12 @@ func LoadWithConfigDir(configDir string) (*Config, error) {
 	v.AutomaticEnv()
 	v.SetEnvPrefix("MCP") // MCP_SERVER_PORT, etc.
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+
+	// Explicit BindEnv for runtime-critical keys: Viper's Unmarshal does not
+	// consult AutomaticEnv for keys whose values come solely from env vars
+	// (github.com/spf13/viper#584). BindEnv registers the mapping explicitly
+	// so Unmarshal can see it regardless of whether the key exists in the file.
+	bindJudgeEnv(v)
 
 	// Set default values first
 	setDefaults(v)

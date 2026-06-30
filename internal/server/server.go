@@ -130,6 +130,13 @@ func New(cfg *config.Config) (*MCPFirewall, error) {
 		// openai|anthropic is reachable at runtime, not just NewOllamaJudge.
 		j := judge.NewJudge(buildJudgeConfig(cfg.Judge), nil, logger)
 		ruleEngine = judge.NewRuleEngine(j, logger)
+		logger.Info("[AEGIR STARTUP] Judge enabled",
+			"provider", cfg.Judge.Provider,
+			"base_url", cfg.Judge.BaseURL,
+			"model", cfg.Judge.Model,
+		)
+	} else {
+		logger.Info("[AEGIR STARTUP] Judge disabled — pattern-only mode (set MCP_JUDGE_ENABLED=true to enable)")
 	}
 
 	// Loudly warn when judge reasoning is exposed to clients (debug/audit
