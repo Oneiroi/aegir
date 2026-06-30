@@ -292,4 +292,12 @@ func showCurrentConfig(cfg *config.Config) {
 		fmt.Printf("    Max Session Age: %v\n", cfg.SessionAnalysis.MaxSessionAge)
 		fmt.Printf("    Threat Threshold: %.2f\n", cfg.SessionAnalysis.ThreatThreshold)
 	}
+
+	fmt.Printf("\nJudge:\n")
+	fmt.Printf("  Enabled: %v\n", cfg.Judge.Enabled)
+	if cfg.Judge.Enabled {
+		fmt.Printf("  Provider: %s\n", cfg.Judge.Provider)
+		fmt.Printf("  Base URL: %s\n", cfg.Judge.BaseURL)
+		fmt.Printf("  Model: %s\n", cfg.Judge.Model)
+	}
 }

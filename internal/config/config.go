@@ -407,12 +407,57 @@ type RetryConfig struct {
 }
 
 // Load loads configuration from multiple sources with precedence:
+// applyDirectEnvOverrides reads MCP_* env vars directly after Unmarshal and
+// stamps them onto cfg. This is the version-stable path for Viper#584: BindEnv
+// + AutomaticEnv do not reliably influence Unmarshal across Viper v1.x releases
+// (confirmed still broken in v1.21.0). Direct os.Getenv always wins.
+//
+// Coverage: every subsystem whose config section is absent from the default
+// aegir.toml — judge, session_analysis, security.anomaly_detection. Subsystems
+// whose sections DO exist in aegir.toml are safe because Viper#584 only bites
+// keys that exist only in defaults (not in config file).
+//
+// Remaining at-risk keys (not covered here — add BindEnv/override when needed):
+// auth.oauth.enabled, auth.mfa.required, compliance.*.enabled, telemetry.enabled,
+// upstream.*.enabled, security.human_approval.*, security.oauth_scope_audit.enabled.
+func applyDirectEnvOverrides(cfg *Config) {
+	// --- judge ---
+	if v := os.Getenv("MCP_JUDGE_ENABLED"); v != "" {
+		cfg.Judge.Enabled = isTruthyEnv(v)
+	}
+	if v := os.Getenv("MCP_JUDGE_PROVIDER"); v != "" {
+		cfg.Judge.Provider = v
+	}
+	if v := os.Getenv("MCP_JUDGE_BASE_URL"); v != "" {
+		cfg.Judge.BaseURL = v
+	}
+	if v := os.Getenv("MCP_JUDGE_MODEL"); v != "" {
+		cfg.Judge.Model = v
+	}
+	if v := os.Getenv("MCP_JUDGE_API_KEY"); v != "" {
+		cfg.Judge.APIKey = v
+	}
+
+	// --- session analysis (gates ConversationalThreatAnalyzer init) ---
+	if v := os.Getenv("MCP_SESSION_ANALYSIS_ENABLED"); v != "" {
+		cfg.SessionAnalysis.Enabled = isTruthyEnv(v)
+	}
+
+	// --- anomaly detection (gates HeuristicDetector init, default disabled) ---
+	if v := os.Getenv("MCP_SECURITY_ANOMALY_DETECTION_ENABLED"); v != "" {
+		cfg.Security.AnomalyDetection.Enabled = isTruthyEnv(v)
+	}
+
+	// --- rate limiting (gates RateLimiter init) ---
+	if v := os.Getenv("MCP_SECURITY_RATE_LIMIT_ENABLED"); v != "" {
+		cfg.Security.RateLimit.Enabled = isTruthyEnv(v)
+	}
+}
+
 // bindJudgeEnv explicitly registers MCP_JUDGE_* → judge.* mappings on the
-// supplied Viper instance. This works around a long-standing Viper limitation
-// (github.com/spf13/viper#584) where Unmarshal ignores keys discovered solely
-// via AutomaticEnv — i.e. keys whose value is only in the environment and
-// absent from the config file and defaults cannot be unmarshalled.
-// BindEnv makes the mapping explicit and queryable by Unmarshal.
+// supplied Viper instance. Kept as a belt-and-suspenders companion to
+// applyJudgeEnvOverrides: BindEnv improves Viper's Get() resolution even if
+// Unmarshal still skips it in some versions.
 func bindJudgeEnv(v *viper.Viper) {
 	pairs := [][2]string{
 		{"judge.enabled", "MCP_JUDGE_ENABLED"},
@@ -494,6 +539,13 @@ func LoadWithConfigFile(configFile string) (*Config, error) {
 		return nil, fmt.Errorf("error unmarshaling config: %w", err)
 	}
 
+	// Post-unmarshal direct env overrides: Viper's Unmarshal does not reliably
+	// pick up BindEnv values for nested bool/string fields in all v1.x releases
+	// (github.com/spf13/viper#584). Reading os.Getenv directly after Unmarshal
+	// is the only version-stable guarantee. We do this for every MCP_JUDGE_*
+	// key so runtime env always wins over config-file or default values.
+	applyDirectEnvOverrides(&cfg)
+
 	// Validate configuration
 	if err := validateConfig(&cfg); err != nil {
 		return nil, fmt.Errorf("configuration validation failed: %w", err)
@@ -549,6 +601,8 @@ func LoadWithConfigDir(configDir string) (*Config, error) {
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("error unmarshaling config: %w", err)
 	}
+
+	applyDirectEnvOverrides(&cfg)
 
 	// Validate configuration
 	if err := validateConfig(&cfg); err != nil {
