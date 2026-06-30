@@ -56,6 +56,9 @@ requests_per_min = 1000
 burst_size = 100
 cleanup_interval = 300
 
+[security.detection]
+enabled = true  # Master detection switch — keep true or ALL detections are skipped
+
 [security.sanitization]
 enabled = true
 xss_prevention = true
