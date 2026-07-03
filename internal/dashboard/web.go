@@ -1,18 +1,36 @@
 package dashboard
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
 
-// ServeWebDashboard serves the main web dashboard interface
+// newCSPNonce returns a fresh base64 nonce for per-request CSP (AEGIR-L-001).
+func newCSPNonce() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		// Non-fatal: an empty nonce yields a CSP that blocks the inline script,
+		// which fails safe (dashboard breaks) rather than falling open.
+		return ""
+	}
+	return base64.StdEncoding.EncodeToString(b)
+}
+
+// ServeWebDashboard serves the main web dashboard interface.
+// AEGIR-L-001: inline <style>/<script> are authorised with a per-request nonce
+// instead of 'unsafe-inline', so injected inline scripts without the nonce are
+// blocked by the browser.
 func (api *DashboardAPI) ServeWebDashboard(c *gin.Context) {
-	// Dashboard uses inline scripts/styles — override the global strict CSP for this route only.
-	// connect-src 'self' is required so fetch() calls to /api/dashboard/ and /auth/login work.
-	c.Header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'")
+	nonce := newCSPNonce()
+	c.Header("Content-Security-Policy",
+		"default-src 'self'; script-src 'self' 'nonce-"+nonce+"'; style-src 'self' 'nonce-"+nonce+"'; connect-src 'self'")
 	c.Header("Content-Type", "text/html; charset=utf-8")
-	c.String(http.StatusOK, dashboardHTML)
+	page := strings.ReplaceAll(dashboardHTML, "{{CSP_NONCE}}", nonce)
+	c.String(http.StatusOK, page)
 }
 
 // RegisterWebRoutes registers the web dashboard routes
@@ -27,7 +45,7 @@ const dashboardHTML = `<!DOCTYPE html>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Aegir</title>
-    <style>
+    <style nonce="{{CSP_NONCE}}">
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
@@ -93,11 +111,11 @@ const dashboardHTML = `<!DOCTYPE html>
             <div id="login-error" class="error-message" style="display: none;"></div>
             <div class="form-group">
                 <label for="username">Username</label>
-                <input type="text" id="username" placeholder="admin" autocomplete="username">
+                <input type="text" id="username" placeholder="admin" autocomplete="off">
             </div>
             <div class="form-group">
                 <label for="password">Password</label>
-                <input type="password" id="password" placeholder="Password" autocomplete="current-password">
+                <input type="password" id="password" placeholder="Password" autocomplete="off">
             </div>
             <button class="btn" onclick="handleLogin()">Sign In</button>
             <div style="text-align: center; margin-top: 1rem;">
@@ -144,7 +162,7 @@ const dashboardHTML = `<!DOCTYPE html>
         </div>
     </div>
 
-    <script>
+    <script nonce="{{CSP_NONCE}}">
     let token = localStorage.getItem('aegir_token');
     // Guard against a stale "undefined" string stored by a previous bad login.
     if (token === 'undefined' || token === 'null') {
@@ -289,7 +307,25 @@ const dashboardHTML = `<!DOCTYPE html>
         }
     }
 
-    setInterval(updateDashboard, 5000);
+    // AEGIR-L-005: idle session timeout. After 15 minutes with no user
+    // interaction the token is cleared and the login form is shown, so an
+    // unattended dashboard cannot be used for persistent monitoring.
+    const IDLE_TIMEOUT_MS = 15 * 60 * 1000;
+    let lastActivity = Date.now();
+    function markActivity() { lastActivity = Date.now(); }
+    ['mousemove', 'keydown', 'click', 'scroll', 'touchstart'].forEach(
+        ev => document.addEventListener(ev, markActivity, { passive: true }));
+    function logout() {
+        localStorage.removeItem('aegir_token');
+        token = null;
+        document.getElementById('dashboard-section').style.display = 'none';
+        document.getElementById('login-section').style.display = 'block';
+    }
+    function checkIdle() {
+        if (token && Date.now() - lastActivity > IDLE_TIMEOUT_MS) { logout(); }
+    }
+
+    setInterval(() => { checkIdle(); if (token) updateDashboard(); }, 5000);
     setInterval(() => {
         const el1 = document.getElementById('active-requests');
         const el2 = document.getElementById('total-attacks');

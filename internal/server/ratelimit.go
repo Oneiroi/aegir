@@ -243,23 +243,36 @@ func (rl *RateLimiter) cleanupClients() {
 
 // getClientIP extracts the real client IP address
 func (rl *RateLimiter) getClientIP(c *gin.Context) string {
-	// Check various headers for the real IP
-	headers := []string{
-		"X-Forwarded-For",
-		"X-Real-IP",
-		"X-Client-IP",
-		"CF-Connecting-IP", // Cloudflare
+	// Use RemoteIP() when no trusted proxy list is configured
+	// This is safer as it ignores X-Forwarded-For headers unless explicitly trusted
+	if len(rl.config.TrustedProxies) == 0 {
+		remoteIP, _, err := net.SplitHostPort(c.Request.RemoteAddr)
+		if err != nil {
+			return c.Request.RemoteAddr
+		}
+		return remoteIP
 	}
 
-	for _, header := range headers {
-		if ip := c.GetHeader(header); ip != "" {
-			// Handle comma-separated IPs (X-Forwarded-For can have multiple)
-			if header == "X-Forwarded-For" {
-				ips := parseForwardedFor(ip)
-				if len(ips) > 0 {
-					return ips[0] // Return the first (original client) IP
-				}
+	// If trusted proxies are configured, validate X-Forwarded-For
+	return rl.getClientIPWithTrustedProxies(c)
+}
+
+// getClientIPWithTrustedProxies extracts client IP using X-Forwarded-For with trusted proxy validation
+func (rl *RateLimiter) getClientIPWithTrustedProxies(c *gin.Context) string {
+	// Check X-Forwarded-For header
+	if ip := c.GetHeader("X-Forwarded-For"); ip != "" {
+		ips := parseForwardedFor(ip)
+		if len(ips) > 0 {
+			// Validate that all intermediate proxies are trusted
+			if rl.isValidTrustedProxyChain(c, ips) {
+				return ips[0] // Return the original client IP
 			}
+		}
+	}
+
+	// Check X-Real-IP header
+	if ip := c.GetHeader("X-Real-IP"); ip != "" {
+		if rl.isTrustedProxy(c) {
 			return ip
 		}
 	}
@@ -270,6 +283,42 @@ func (rl *RateLimiter) getClientIP(c *gin.Context) string {
 		return c.Request.RemoteAddr
 	}
 	return host
+}
+
+// isValidTrustedProxyChain validates that X-Forwarded-For chain is from trusted proxies
+func (rl *RateLimiter) isValidTrustedProxyChain(c *gin.Context, ips []string) bool {
+	remoteIP := c.Request.RemoteAddr
+	if idx := strings.LastIndex(remoteIP, ":"); idx != -1 {
+		remoteIP = remoteIP[:idx]
+	}
+
+	// Check if the remote IP (immediate proxy) is trusted
+	if !rl.isTrustedProxyIP(remoteIP) {
+		return false
+	}
+
+	// For multi-hop X-Forwarded-For, we trust the first IP if immediate proxy is trusted
+	// In production, you might want to validate the entire chain
+	return true
+}
+
+// isTrustedProxy checks if the request comes from a trusted proxy
+func (rl *RateLimiter) isTrustedProxy(c *gin.Context) bool {
+	remoteIP := c.Request.RemoteAddr
+	if idx := strings.LastIndex(remoteIP, ":"); idx != -1 {
+		remoteIP = remoteIP[:idx]
+	}
+	return rl.isTrustedProxyIP(remoteIP)
+}
+
+// isTrustedProxyIP checks if an IP is in the trusted proxy list
+func (rl *RateLimiter) isTrustedProxyIP(ip string) bool {
+	for _, trusted := range rl.config.TrustedProxies {
+		if trusted == ip {
+			return true
+		}
+	}
+	return false
 }
 
 // parseForwardedFor parses X-Forwarded-For header

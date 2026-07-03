@@ -106,12 +106,19 @@ type WebAuthn struct {
 	RPID string `json:"rpid" mapstructure:"rpid"`
 	// RPOrigin is the fully-qualified origin of the Relying Party, e.g. "https://example.com".
 	RPOrigin string `json:"rp_origin" mapstructure:"rp_origin"`
+	// RequireJWTBinding, when true, requires the X-User-ID supplied to the
+	// register/login finish endpoints to match the authenticated identity in the
+	// request context (AEGIR-H-003). Prevents an attacker from claiming another
+	// user's pending WebAuthn challenge via a spoofed header.
+	RequireJWTBinding bool `json:"require_jwt_binding" mapstructure:"require_jwt_binding"`
 }
 
 // JWT configuration
 type JWT struct {
 	Secret            string        `json:"secret"`
 	Issuer            string        `json:"issuer"`
+	Audience          string        `json:"audience"`
+	KeyID             string        `json:"key_id"`
 	ExpirationTime    time.Duration `json:"expiration_time"`
 	RefreshExpiration time.Duration `json:"refresh_expiration"`
 }
@@ -203,10 +210,11 @@ type Security struct {
 	OAuthScopeAudit  OAuthScopeAuditConfig `json:"oauth_scope_audit" mapstructure:"oauth_scope_audit"`
 }
 
-// OAuthScopeAuditConfig configures JWT scope auditing (ISC-122).
+// OAuthScopeAuditConfig configures JWT scope auditing and enforcement (ISC-122).
 type OAuthScopeAuditConfig struct {
 	Enabled          bool     `json:"enabled"           mapstructure:"enabled"`
 	ProhibitedScopes []string `json:"prohibited_scopes" mapstructure:"prohibited_scopes"`
+	Enforcement      bool     `json:"enforcement"       mapstructure:"enforcement"`
 }
 
 // ReconRateLimitConfig configures per-session tools/list frequency detection (ISC-121).
@@ -228,11 +236,16 @@ type HumanApprovalConfig struct {
 
 // RateLimit configuration
 type RateLimit struct {
-	Enabled         bool `json:"enabled"          mapstructure:"enabled"`
-	RequestsPerMin  int  `json:"requests_per_min" mapstructure:"requests_per_min"`
-	BurstSize       int  `json:"burst_size"       mapstructure:"burst_size"`
-	CleanupInterval int  `json:"cleanup_interval" mapstructure:"cleanup_interval"`
-	MaxTrackedIPs   int  `json:"max_tracked_ips"  mapstructure:"max_tracked_ips"`
+	Enabled         bool     `json:"enabled"          mapstructure:"enabled"`
+	RequestsPerMin  int      `json:"requests_per_min" mapstructure:"requests_per_min"`
+	BurstSize       int      `json:"burst_size"       mapstructure:"burst_size"`
+	CleanupInterval int      `json:"cleanup_interval" mapstructure:"cleanup_interval"`
+	MaxTrackedIPs   int      `json:"max_tracked_ips"  mapstructure:"max_tracked_ips"`
+	// TrustedProxies lists proxy IPs whose X-Forwarded-For/X-Real-IP headers are
+	// honoured for client-IP extraction. When empty, those headers are ignored and
+	// the rate limiter keys on the direct RemoteAddr — preventing header spoofing
+	// from bypassing the limiter (AEGIR-M-002).
+	TrustedProxies  []string `json:"trusted_proxies"  mapstructure:"trusted_proxies"`
 }
 
 // Sanitization configuration

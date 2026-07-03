@@ -110,7 +110,7 @@ func New(config config.Auth, logger *logging.Logger) (*Manager, error) {
 
 	// Initialise WebAuthn handler if RPID is configured (optional feature).
 	if config.WebAuthn.RPID != "" {
-		waHandler, err := wahandler.NewHandler(config.WebAuthn.RPID, config.WebAuthn.RPOrigin, logger)
+		waHandler, err := wahandler.NewHandlerWithBinding(config.WebAuthn.RPID, config.WebAuthn.RPOrigin, logger, config.WebAuthn.RequireJWTBinding)
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialise WebAuthn handler: %w", err)
 		}
@@ -580,10 +580,20 @@ func (m *Manager) generateJWT(user *User) (string, error) {
 
 // validateJWT validates a JWT token and returns claims
 func (m *Manager) validateJWT(tokenString string) (*Claims, error) {
+	// Validate HMAC signing method
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
+
+		// Optionally validate key ID (kid) header
+		if m.config.JWT.KeyID != "" {
+			tokenKid, ok := token.Header["kid"].(string)
+			if !ok || tokenKid != m.config.JWT.KeyID {
+				return nil, fmt.Errorf("invalid key ID: expected %q, got %v", m.config.JWT.KeyID, token.Header["kid"])
+			}
+		}
+
 		return m.jwtSecret, nil
 	})
 
@@ -591,11 +601,45 @@ func (m *Manager) validateJWT(tokenString string) (*Claims, error) {
 		return nil, err
 	}
 
-	if claims, ok := token.Claims.(*Claims); ok && token.Valid {
-		return claims, nil
+	claims, ok := token.Claims.(*Claims)
+	if !ok || !token.Valid {
+		return nil, fmt.Errorf("invalid token")
 	}
 
-	return nil, fmt.Errorf("invalid token")
+	// Validate issuer if configured
+	if m.config.JWT.Issuer != "" {
+		if claims.Issuer != m.config.JWT.Issuer {
+			return nil, fmt.Errorf("invalid issuer: expected %q, got %q", m.config.JWT.Issuer, claims.Issuer)
+		}
+	}
+
+	// Validate audience if configured
+	if m.config.JWT.Audience != "" {
+		if len(claims.Audience) == 0 {
+			return nil, fmt.Errorf("token missing required audience")
+		}
+		valid := false
+		for _, aud := range claims.Audience {
+			if aud == m.config.JWT.Audience {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return nil, fmt.Errorf("invalid audience: expected %q, got %v", m.config.JWT.Audience, claims.Audience)
+		}
+	}
+
+	return claims, nil
+}
+
+// VerifyTokenSignature validates a JWT's signature and standard claims and
+// returns nil when the token is authentic. It is exported so middleware that
+// needs to trust unparsed payload fields (e.g. OAuth scope auditing — AEGIR-M-003)
+// can confirm the token is signed by this server before acting on its contents.
+func (m *Manager) VerifyTokenSignature(tokenString string) error {
+	_, err := m.validateJWT(tokenString)
+	return err
 }
 
 // generateRefreshToken generates a refresh token

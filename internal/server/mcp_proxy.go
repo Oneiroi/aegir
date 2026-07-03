@@ -97,11 +97,17 @@ func NewMCPProxy(cfg *config.Config, logger *logging.Logger, sanitizerMgr *sanit
 		ruleEngine:        ruleEng,
 		upgrader: websocket.Upgrader{
 			// Validate the WebSocket Origin against AllowedOrigins (ISC-120).
-			// Non-browser clients omit Origin and always pass. An empty
-			// AllowedOrigins list permits all origins (default/non-restrictive).
+			// Require Origin header for WebSocket connections.
+			// Empty AllowedOrigins list requires Origin to be present but
+			// allows any non-empty origin (default/non-restrictive).
 			CheckOrigin: func(r *http.Request) bool {
 				origin := r.Header.Get("Origin")
-				if origin == "" || len(cfg.Security.AllowedOrigins) == 0 {
+				if origin == "" {
+					// Require Origin header for security (prevents CSRF attacks)
+					return false
+				}
+				if len(cfg.Security.AllowedOrigins) == 0 {
+					// Allow any origin if allowlist is empty (default behavior)
 					return true
 				}
 				for _, allowed := range cfg.Security.AllowedOrigins {
@@ -294,11 +300,14 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 		if paramsMap, ok := req.Params.(map[string]interface{}); ok {
 			if uri, ok := paramsMap["uri"].(string); ok {
 				if err := p.validateResourceURI(uri); err != nil {
+					// AEGIR-L-003: log the specific reason server-side; return a
+					// generic message so the client learns nothing about internal
+					// validation logic or reachable targets.
+					p.logger.Warn("resource URI validation failed", "uri", uri, "error", err.Error())
 					c.JSON(http.StatusForbidden, MCPResponse{
 						Error: &MCPError{
 							Code:    -32000,
 							Message: "Resource access denied",
-							Data:    err.Error(),
 						},
 						ID: req.ID,
 					})
@@ -336,12 +345,12 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 		judgeVerdict := sanitizerVerdictToJudge(sanitizationResult)
 		judgeResult, err := p.ruleEngine.Route(c.Request.Context(), judgeVerdict, string(judgePayload))
 		if err != nil {
+			// AEGIR-L-003: internal judge/backend error detail stays server-side.
 			p.logger.Error("Judge routing error", "error", err)
 			c.JSON(http.StatusForbidden, MCPResponse{
 				Error: &MCPError{
 					Code:    -32000,
 					Message: "Security analysis failed",
-					Data:    err.Error(),
 				},
 				ID: req.ID,
 			})
@@ -430,24 +439,23 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 		p.trackReconCall(c, &req)
 	}
 
-	// Sanitize response before returning
+	// Marshal response to JSON
 	responseJSON, _ := json.Marshal(response.Result)
-	responseSanitized := p.sanitizer.SanitizeContent(string(responseJSON))
 
-	// Scan response for compliance violations (P1-3: Response compliance gap)
-	responseComplianceResult := p.complianceManager.ScanForCompliance(responseSanitized.Sanitized)
+	// Scan response for compliance violations BEFORE sanitization
+	// (P1-3: Response compliance gap) — compliance acts as policy layer,
+	// sanitizer as enforcement layer. This ensures compliance policy is
+	// enforced on raw content before redaction occurs.
+	responseComplianceResult := p.complianceManager.ScanForCompliance(string(responseJSON))
 
-	if responseSanitized.Sanitized != string(responseJSON) {
-		var sanitizedResult interface{}
-		if err := json.Unmarshal([]byte(responseSanitized.Sanitized), &sanitizedResult); err == nil {
-			response.Result = sanitizedResult
-		}
-	}
-
-	// Log compliance violations in response (ISC-27): every PII/PHI/PCI
-	// detection is recorded with its per-type severity, not just an aggregate
-	// count, so the audit trail shows which regulated data types were present
-	// in the model output and at what severity.
+	// Single decision point for compliance handling (AEGIR-H-002). ORDER MATTERS:
+	//   1. Log the violation FIRST — including the block path — so the audit trail
+	//      never loses a regulated-data event to an early return.
+	//   2. Only ever log the redacted, per-type severity SUMMARY
+	//      (summarizeComplianceViolations), never the raw response body or the
+	//      redacted payload — no regulated values are written to the log
+	//      (AEGIR-L-003 / no data sprawl into the audit trail).
+	//   3. Apply the per-data-type action (ISC-28): block > redact > log-only.
 	if len(responseComplianceResult.Violations) > 0 {
 		p.logger.LogSecurityEvent(&logging.SecurityEvent{
 			Type:      "response_compliance_violation",
@@ -457,16 +465,12 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 			Details: map[string]string{
 				"violations": strconv.Itoa(len(responseComplianceResult.Violations)),
 				"risk_level": responseComplianceResult.ComplianceRisk,
+				// Redacted, aggregate-per-type summary only — no regulated values.
 				"data_types": summarizeComplianceViolations(responseComplianceResult.Violations),
 			},
 		})
 
-		// Apply per-data-type response policy (ISC-28). For each violation, look up
-		// the configured action for its type in compliance.response_policy. Highest-
-		// priority action wins across all violations: block > redact > log-only.
-		// Absent types default to "redact".
-		action := p.responseComplianceAction(responseComplianceResult.Violations)
-		switch action {
+		switch p.responseComplianceAction(responseComplianceResult.Violations) {
 		case "block":
 			p.logger.Warn("MCP response blocked by per-type compliance policy",
 				"violations", len(responseComplianceResult.Violations),
@@ -480,17 +484,27 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 			})
 			return
 		case "redact":
-			// responseSanitized already has sanitizer redactions applied above;
-			// for compliance-specific redaction we re-apply on the post-scan text
-			// to ensure the policy-triggered path also strips the regulated content.
-			redacted := p.sanitizer.SanitizeContent(responseComplianceResult.Sanitized)
-			if redacted.Sanitized != responseComplianceResult.Sanitized {
+			// Enforce redaction on the raw response, then forward.
+			redacted := p.sanitizer.SanitizeContent(string(responseJSON))
+			if redacted.Sanitized != string(responseJSON) {
 				var redactedResult interface{}
 				if err := json.Unmarshal([]byte(redacted.Sanitized), &redactedResult); err == nil {
 					response.Result = redactedResult
 				}
 			}
-		// "log-only": already logged above; fall through to forward response as-is.
+			c.JSON(http.StatusOK, response)
+			return
+		// "log-only": already logged; fall through to the default sanitizer pass.
+		}
+	}
+
+	// Default path (no violations, or log-only): apply the sanitizer for
+	// PII/PHI/PCI redaction independent of compliance policy, then forward.
+	responseSanitized := p.sanitizer.SanitizeContent(string(responseJSON))
+	if responseSanitized.Sanitized != string(responseJSON) {
+		var sanitizedResult interface{}
+		if err := json.Unmarshal([]byte(responseSanitized.Sanitized), &sanitizedResult); err == nil {
+			response.Result = sanitizedResult
 		}
 	}
 
@@ -729,6 +743,14 @@ func (p *MCPProxy) scanToolResultForInjection(result interface{}) (blocked bool,
 		if scan.Blocked {
 			return true, fmt.Sprintf("risk=%s, detections=%d", scan.Risk, len(scan.Detections))
 		}
+		// AEGIR-M-005: tool result content may carry URLs the client would
+		// dereference. Block any that resolve to private/loopback/link-local
+		// targets so a poisoned upstream cannot pivot the client into SSRF.
+		for _, tok := range strings.Fields(text) {
+			if looksLikeURL(tok) && isSSRFTarget(tok) {
+				return true, "ssrf target in tool result"
+			}
+		}
 	}
 	return false, ""
 }
@@ -828,17 +850,17 @@ func (p *MCPProxy) handleToolsCall(_ context.Context, req *MCPRequest) *MCPRespo
 	args, _ := params["arguments"].(map[string]interface{})
 
 	// SSRF guard: reject any string argument that targets a private/link-local address (P1-5).
-	if args != nil {
-		for _, v := range args {
-			if urlStr, ok := v.(string); ok && isSSRFTarget(urlStr) {
-				return &MCPResponse{
-					Error: &MCPError{
-						Code:    -32000,
-						Message: "Request blocked: SSRF target detected in tool arguments",
-						Data:    urlStr,
-					},
-					ID: req.ID,
-				}
+	for _, v := range args {
+		if urlStr, ok := v.(string); ok && isSSRFTarget(urlStr) {
+			// AEGIR-L-003: log the offending URL server-side; do not echo it back
+			// to the client (it confirms which internal targets are reachable).
+			p.logger.Warn("SSRF target blocked in tool arguments", "url", urlStr)
+			return &MCPResponse{
+				Error: &MCPError{
+					Code:    -32000,
+					Message: "Request blocked: SSRF target detected in tool arguments",
+				},
+				ID: req.ID,
 			}
 		}
 	}
@@ -991,21 +1013,303 @@ func (p *MCPProxy) requestHumanApproval(toolName string, args map[string]interfa
 	return nil
 }
 
-// isSSRFTarget returns true if s is a URL targeting a private, link-local, or loopback address.
+// isSSRFTarget returns true if s is a URL targeting a private, link-local, loopback,
+// unspecified, or otherwise unsafe address. It parses the URL with net/url, checks
+// the scheme against a blocklist (file://, gopher://, ws://, wss://, about:), validates
+// the hostname for localhost/localdomain/IPv6 loopback forms, and resolves the IP to
+// check against RFC 1918, link-local, loopback, and unspecified ranges.
 func isSSRFTarget(s string) bool {
-	lower := strings.ToLower(strings.TrimSpace(s))
-	for _, prefix := range []string{
-		"http://169.254.", "https://169.254.",
-		"http://127.", "https://127.",
-		"http://10.", "https://10.",
-		"http://192.168.", "https://192.168.",
-		"file://",
-	} {
-		if strings.HasPrefix(lower, prefix) {
+	raw := strings.TrimSpace(s)
+	if raw == "" {
+		return false
+	}
+
+	// Strip any embedded credentials (user:pass@)
+	if idx := strings.Index(raw, "://"); idx >= 0 {
+		scheme := strings.ToLower(raw[:idx])
+		// Block dangerous schemes outright
+		switch scheme {
+		case "file", "gopher", "ws", "wss", "about", "data", "javascript", "blob":
 			return true
 		}
 	}
+
+	u, err := url.Parse(raw)
+	if err != nil {
+		// If we can't parse it, assume it might be a native IP notation like
+		// 0x7F000001 (hex) or 0177.0000.0000.0001 (octal). Check the raw string.
+		return isSSRFUnsafeRaw(raw)
+	}
+
+	// Check scheme
+	scheme := strings.ToLower(u.Scheme)
+	if scheme == "file" || scheme == "gopher" || scheme == "ws" || scheme == "wss" ||
+		scheme == "about" || scheme == "data" || scheme == "javascript" || scheme == "blob" {
+		return true
+	}
+
+	host := u.Hostname()
+	if host == "" {
+		return false
+	}
+
+	// Check for localhost/localdomain
+	if isLocalHost(host) {
+		return true
+	}
+
+	// Check for IPv6 loopback forms
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		ipStr := host[1 : len(host)-1]
+		if isIPv6Loopback(ipStr) {
+			return true
+		}
+		// Also check if it's an IPv4-mapped IPv6 like [::ffff:127.0.0.1]
+		if ip := net.ParseIP(ipStr); ip != nil && isUnsafeIP(ip) {
+			return true
+		}
+		return isIPv6Loopback(ipStr)
+	}
+
+	// Check for integer IP notation (e.g., 0x7F000001, 0177.0000.0000.0001)
+	if isIntegerIP(host) {
+		return true
+	}
+
+	// Resolve the hostname to an IP address
+	// Use context with timeout to prevent DNS rebinding attacks
+	resolvedIP, err := resolveIP(host)
+	if err != nil {
+		// If resolution fails, check if it's a known unsafe pattern
+		return isUnsafeRawIP(host)
+	}
+
+	return isUnsafeIP(resolvedIP)
+}
+
+// isLocalHost returns true if host is a form of localhost
+func isLocalHost(host string) bool {
+	switch strings.ToLower(host) {
+	case "localhost", "localdomain":
+		return true
+	}
 	return false
+}
+
+// isIPv6Loopback returns true if s is an IPv6 loopback address form
+func isIPv6Loopback(s string) bool {
+	switch s {
+	case "::1", "0:0:0:0:0:0:0:1", "0000:0000:0000:0000:0000:0000:0000:0001",
+		"::", "0:0:0:0:0:0:0:0":
+		return true
+	}
+	// Normalize: ::ffff:127.0.0.1 or ::ffff:0:0:0:0:127.0.0.1
+	if strings.HasPrefix(s, "::ffff:") {
+		remaining := s[7:]
+		if ip := net.ParseIP(remaining); ip != nil {
+			// It's an IPv4-mapped IPv6; check if the IPv4 is loopback
+			if ip.To4() != nil {
+				host := ip.To4().String()
+				return isLocalHost(host) || isRFC1918(host)
+			}
+		}
+	}
+	return false
+}
+
+// isIntegerIP returns true if s is a non-dotted-decimal IPv4 notation
+// (hex 0x7F000001, decimal 2130706433, or dotted hex/octal like 0177.0.0.1)
+// that decodes to an unsafe address. Go's net.ParseIP rejects every one of
+// these forms, so we decode them ourselves — otherwise this check is dead code
+// and IMDS blocking depends entirely on the platform resolver canonicalising
+// them, which the pure-Go resolver (GODEBUG=netdns=go) does not do (AEGIR-C-001
+// hardening: make the block deterministic, not resolver-incidental).
+func isIntegerIP(s string) bool {
+	if ip := parseIntegerIP(s); ip != nil {
+		return isUnsafeIP(ip)
+	}
+	return false
+}
+
+// parseIntegerIP decodes the non-standard IPv4 integer notations that
+// net.ParseIP refuses, returning a canonical net.IP or nil if s is not one of
+// them. Handled forms:
+//   - single hex:      0x7F000001 / 0X7f000001
+//   - single decimal:  2130706433            (must be > 255 to avoid clashing
+//     with a bare octet; bare small ints aren't routable hosts anyway)
+//   - single octal:    017700000001
+//   - dotted a.b.c.d where each octet may be decimal, 0x-hex, or 0-octal
+func parseIntegerIP(s string) net.IP {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+
+	// Dotted forms: 1–4 parts, each decimal/hex/octal.
+	if strings.Contains(s, ".") {
+		parts := strings.Split(s, ".")
+		if len(parts) < 1 || len(parts) > 4 {
+			return nil
+		}
+		octets := make([]uint64, len(parts))
+		for i, p := range parts {
+			v, ok := parseUintAutoBase(p)
+			if !ok || v > 0xFF {
+				return nil
+			}
+			octets[i] = v
+		}
+		// Only treat as integer-notation if at least one octet used a
+		// non-decimal base or leading zero; plain dotted-decimal is handled by
+		// net.ParseIP upstream. We still decode here for the resolver-fail path.
+		if len(octets) == 4 {
+			return net.IPv4(byte(octets[0]), byte(octets[1]), byte(octets[2]), byte(octets[3]))
+		}
+		return nil
+	}
+
+	// Single-number forms (hex/octal/decimal 32-bit).
+	v, ok := parseUintAutoBase(s)
+	if !ok || v > 0xFFFFFFFF {
+		return nil
+	}
+	// Require > 255 so we don't misread a bare small integer as an IP.
+	if v <= 0xFF {
+		return nil
+	}
+	return net.IPv4(byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
+}
+
+// parseUintAutoBase parses a uint using Go's base-0 auto-detection (0x → hex,
+// leading 0 → octal, else decimal). Returns ok=false on any parse error.
+func parseUintAutoBase(s string) (uint64, bool) {
+	if s == "" {
+		return 0, false
+	}
+	v, err := strconv.ParseUint(s, 0, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
+}
+
+// resolveIP resolves a hostname to an IP address with a timeout
+func resolveIP(host string) (net.IP, error) {
+	addr, err := net.ResolveIPAddr("ip", host)
+	if err != nil {
+		return nil, err
+	}
+	return addr.IP, nil
+}
+
+// isUnsafeIP returns true if ip is a private, loopback, link-local, or unspecified address
+func isUnsafeIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+
+	// Unspecified address (0.0.0.0 or ::)
+	if ip.IsUnspecified() {
+		return true
+	}
+
+	// Loopback (127.0.0.0/8, ::1)
+	if ip.IsLoopback() {
+		return true
+	}
+
+	// Link-local (169.254.0.0/16, fe80::/10)
+	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+
+	// Private networks (RFC 1918)
+	if ip.IsPrivate() {
+		return true
+	}
+
+	// IPv4-mapped IPv6 loopback (::ffff:127.0.0.1)
+	if ip4 := ip.To4(); ip4 != nil {
+		// Check if it's actually an IPv4 address that's unsafe
+		return isUnsafeIPv4(ip4)
+	}
+
+	return false
+}
+
+// isUnsafeIPv4 checks if an IPv4 address is in unsafe ranges
+func isUnsafeIPv4(ip net.IP) bool {
+	// 0.0.0.0/8 (unspecified)
+	if ip[0] == 0 {
+		return true
+	}
+	// 10.0.0.0/8 (private)
+	if ip[0] == 10 {
+		return true
+	}
+	// 172.16.0.0/12 (private)
+	if ip[0] == 172 && ip[1] >= 16 && ip[1] <= 31 {
+		return true
+	}
+	// 192.168.0.0/16 (private)
+	if ip[0] == 192 && ip[1] == 168 {
+		return true
+	}
+	// 127.0.0.0/8 (loopback)
+	if ip[0] == 127 {
+		return true
+	}
+	// 169.254.0.0/16 (link-local)
+	if ip[0] == 169 && ip[1] == 254 {
+		return true
+	}
+	// 224.0.0.0/4 (multicast)
+	if ip[0] >= 224 && ip[0] <= 239 {
+		return true
+	}
+	// 240.0.0.0/4 (reserved)
+	if ip[0] >= 240 {
+		return true
+	}
+
+	return false
+}
+
+// isRFC1918 returns true if ip is in RFC 1918 ranges (private networks)
+func isRFC1918(ip string) bool {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	return parsed.IsPrivate() || parsed.IsLoopback() || parsed.IsLinkLocalUnicast()
+}
+
+// isUnsafeRawIP checks if a raw string looks like an unsafe IP address
+func isUnsafeRawIP(s string) bool {
+	// Check for dotted decimal with unsafe values
+	if ip := net.ParseIP(s); ip != nil {
+		return isUnsafeIP(ip)
+	}
+	// Check if it looks like an integer IP
+	if isIntegerIP(s) {
+		return true
+	}
+	return false
+}
+
+// isSSRFUnsafeRaw checks raw strings that look like unsafe addresses
+func isSSRFUnsafeRaw(s string) bool {
+	// Remove any scheme if present
+	if idx := strings.Index(s, "://"); idx >= 0 {
+		s = s[idx+3:]
+	}
+	// Remove port
+	if idx := strings.Index(s, ":"); idx >= 0 {
+		s = s[:idx]
+	}
+	// Remove brackets (IPv6)
+	s = strings.Trim(s, "[]")
+	return isUnsafeRawIP(s)
 }
 
 // handlePromptsList processes prompts/list requests
@@ -1091,7 +1395,10 @@ func (p *MCPProxy) HandleSSE(c *gin.Context) {
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
-	c.Header("Access-Control-Allow-Origin", "*")
+	// Use configured AllowedOrigins instead of wildcard
+	if origin := p.corsOrigin(c); origin != "" {
+		c.Header("Access-Control-Allow-Origin", origin)
+	}
 	c.Header("Access-Control-Allow-Headers", "Cache-Control")
 
 	// Get the response writer
@@ -1153,7 +1460,10 @@ func (p *MCPProxy) HandleSSEEvents(c *gin.Context) {
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
-	c.Header("Access-Control-Allow-Origin", "*")
+	// Use configured AllowedOrigins instead of wildcard
+	if origin := p.corsOrigin(c); origin != "" {
+		c.Header("Access-Control-Allow-Origin", origin)
+	}
 	c.Header("Access-Control-Allow-Headers", "Cache-Control")
 
 	w := c.Writer
@@ -1353,4 +1663,28 @@ func sanitizerVerdictToJudge(result *sanitizer.SanitizationResult) judge.Verdict
 		return judge.SUSPICIOUS
 	}
 	return judge.ALLOW
+}
+
+// corsOrigin returns the appropriate CORS origin header value for SSE endpoints.
+// Returns empty string if CORS should not be set.
+func (p *MCPProxy) corsOrigin(c *gin.Context) string {
+	if origin := p.corsAllowedOrigin(c); origin != "" {
+		return origin
+	}
+	// Fall back to request Origin header if present
+	return c.GetHeader("Origin")
+}
+
+// corsAllowedOrigin returns the configured allowed origin, or empty string
+func (p *MCPProxy) corsAllowedOrigin(c *gin.Context) string {
+	// Use configured allowed origins from security config
+	if p.config != nil && len(p.config.Security.AllowedOrigins) > 0 {
+		origin := c.GetHeader("Origin")
+		for _, allowed := range p.config.Security.AllowedOrigins {
+			if origin == allowed {
+				return allowed
+			}
+		}
+	}
+	return ""
 }

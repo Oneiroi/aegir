@@ -318,8 +318,8 @@ func (s *MCPFirewall) securityHeaders() gin.HandlerFunc {
 
 // oauthScopeAuditMiddleware inspects Bearer JWT tokens on incoming MCP requests
 // and fires an excessive_scope_detected security event when the token's scope
-// or scp claim contains a prohibited value (ISC-122). This is an audit-only
-// middleware — it logs and continues; blocking happens in the auth middleware.
+// or scp claim contains a prohibited value (ISC-122). If enforcement is enabled,
+// returns 403 with prohibited_scope security event.
 func (s *MCPFirewall) oauthScopeAuditMiddleware() gin.HandlerFunc {
 	cfg := s.config.Security.OAuthScopeAudit
 	return func(c *gin.Context) {
@@ -333,10 +333,30 @@ func (s *MCPFirewall) oauthScopeAuditMiddleware() gin.HandlerFunc {
 			return
 		}
 		tokenStr := authHeader[7:]
+		// AEGIR-M-003: when enforcing (not merely auditing), the token's scopes
+		// must come from an authentic token. Reject any token whose signature
+		// does not verify before reading its scope claims, so a forged payload
+		// cannot be used to (a) pass enforcement or (b) inject audit noise.
+		if cfg.Enforcement {
+			if err := s.auth.VerifyTokenSignature(tokenStr); err != nil {
+				s.logger.LogSecurityEvent(&logging.SecurityEvent{
+					Type:      "invalid_token_signature",
+					Severity:  "high",
+					Message:   "JWT signature verification failed at scope enforcement",
+					ClientIP:  c.ClientIP(),
+					Timestamp: time.Now(),
+				})
+				c.JSON(401, gin.H{"error": "invalid_token", "message": "token signature verification failed"})
+				c.Abort()
+				return
+			}
+		}
 		scopes := extractJWTScopes(tokenStr)
+		var forbiddenScope string
 		for _, scope := range scopes {
 			for _, prohibited := range cfg.ProhibitedScopes {
 				if scope == prohibited {
+					forbiddenScope = scope
 					s.logger.LogSecurityEvent(&logging.SecurityEvent{
 						Type:      "excessive_scope_detected",
 						Severity:  "high",
@@ -348,8 +368,31 @@ func (s *MCPFirewall) oauthScopeAuditMiddleware() gin.HandlerFunc {
 							"client_ip": c.ClientIP(),
 						},
 					})
+					break
 				}
 			}
+			if forbiddenScope != "" {
+				break
+			}
+		}
+		if forbiddenScope != "" && cfg.Enforcement {
+			s.logger.LogSecurityEvent(&logging.SecurityEvent{
+				Type:      "prohibited_scope",
+				Severity:  "high",
+				Message:   "JWT token rejected: contains prohibited OAuth scope",
+				ClientIP:  c.ClientIP(),
+				Timestamp: time.Now(),
+				Details: map[string]string{
+					"scope":     forbiddenScope,
+					"client_ip": c.ClientIP(),
+				},
+			})
+			c.JSON(403, gin.H{
+				"error":   "prohibited_scope",
+				"message": "token contains prohibited OAuth scope",
+			})
+			c.Abort()
+			return
 		}
 		c.Next()
 	}

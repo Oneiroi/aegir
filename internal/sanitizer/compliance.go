@@ -231,7 +231,10 @@ func (cm *ComplianceManager) isValidCreditCard(cardNumber string) bool {
 	return sum%10 == 0
 }
 
-// tokenizeCardData creates a format-preserving token for card data
+// tokenizeCardData creates a format-preserving token for card data. Retaining
+// the last four digits is opt-in (PCI.TokenizeCards) and is explicitly permitted
+// by PCI DSS for display/reconciliation. The default redaction path (AEGIR-L-004)
+// emits the fully-opaque CARD_DATA_REDACTED marker instead.
 func (cm *ComplianceManager) tokenizeCardData(cardNumber string) string {
 	digits := cm.digitRe.FindAllString(cardNumber, -1)
 	if len(digits) < 4 {

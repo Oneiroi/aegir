@@ -18,11 +18,23 @@ type Handler struct {
 	challenges  *ChallengeStore
 	users       *UserStore
 	logger      *logging.Logger
+	// requireJWTBinding, when true, requires the client-supplied X-User-ID /
+	// user_id to match the authenticated identity the auth middleware placed in
+	// the gin context (key "user_id"). This closes AEGIR-H-003: without it, an
+	// attacker can claim any user's pending challenge by spoofing the header.
+	requireJWTBinding bool
 }
 
 // NewHandler creates a ready-to-use Handler. Returns nil (no error) when rpID is empty
 // so the caller can skip WebAuthn registration.
 func NewHandler(rpID, rpOrigin string, logger *logging.Logger) (*Handler, error) {
+	return NewHandlerWithBinding(rpID, rpOrigin, logger, false)
+}
+
+// NewHandlerWithBinding is NewHandler with the AEGIR-H-003 JWT-identity binding
+// toggle. When requireJWTBinding is true, register/login finish reject any
+// X-User-ID that does not match the authenticated context identity.
+func NewHandlerWithBinding(rpID, rpOrigin string, logger *logging.Logger, requireJWTBinding bool) (*Handler, error) {
 	if rpID == "" {
 		return nil, nil
 	}
@@ -37,12 +49,39 @@ func NewHandler(rpID, rpOrigin string, logger *logging.Logger) (*Handler, error)
 	}
 
 	return &Handler{
-		webauthn:    wa,
-		credentials: NewCredentialStore(),
-		challenges:  NewChallengeStore(5 * time.Minute),
-		users:       NewUserStore(),
-		logger:      logger,
+		webauthn:          wa,
+		credentials:       NewCredentialStore(),
+		challenges:        NewChallengeStore(5 * time.Minute),
+		users:             NewUserStore(),
+		logger:            logger,
+		requireJWTBinding: requireJWTBinding,
 	}, nil
+}
+
+// resolveUserID extracts the target user ID from the X-User-ID header (or the
+// user_id query param fallback) and, when requireJWTBinding is enabled, verifies
+// it matches the authenticated identity in the gin context. Returns ("", false)
+// and writes the appropriate HTTP error when validation fails.
+func (h *Handler) resolveUserID(c *gin.Context) (string, bool) {
+	userID := c.GetHeader("X-User-ID")
+	if userID == "" {
+		userID = c.Query("user_id")
+	}
+	if userID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "X-User-ID header or user_id query param required"})
+		return "", false
+	}
+	if h.requireJWTBinding {
+		authedRaw, ok := c.Get("user_id")
+		authed, _ := authedRaw.(string)
+		if !ok || authed == "" || authed != userID {
+			h.logger.Warn("webauthn identity binding rejected",
+				"claimed_user", userID, "authenticated_user", authed)
+			c.JSON(http.StatusForbidden, gin.H{"error": "X-User-ID does not match authenticated identity"})
+			return "", false
+		}
+	}
+	return userID, true
 }
 
 // ---- register ---------------------------------------------------------------
@@ -85,13 +124,8 @@ func (h *Handler) RegisterBegin(c *gin.Context) {
 // Body: {"user_id":"…", <PublicKeyCredential JSON>}
 // The actual attestation object is embedded in the raw HTTP body per WebAuthn spec.
 func (h *Handler) RegisterFinish(c *gin.Context) {
-	userID := c.GetHeader("X-User-ID")
-	if userID == "" {
-		// Also allow it as a query parameter for convenience in tests
-		userID = c.Query("user_id")
-	}
-	if userID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "X-User-ID header or user_id query param required"})
+	userID, ok := h.resolveUserID(c)
+	if !ok {
 		return
 	}
 
@@ -161,12 +195,8 @@ func (h *Handler) LoginBegin(c *gin.Context) {
 // LoginFinish handles POST /auth/webauthn/login/finish.
 // X-User-ID header (or user_id query param) must carry the same user ID used in LoginBegin.
 func (h *Handler) LoginFinish(c *gin.Context) {
-	userID := c.GetHeader("X-User-ID")
-	if userID == "" {
-		userID = c.Query("user_id")
-	}
-	if userID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "X-User-ID header or user_id query param required"})
+	userID, ok := h.resolveUserID(c)
+	if !ok {
 		return
 	}
 
