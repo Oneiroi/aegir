@@ -11,15 +11,19 @@ started: 2026-05-13T21:00:00Z
 updated: 2026-07-02T00:00:00Z
 ---
 
-> **RELEASE-READINESS NOTE (2026-07-02).** Prior frontmatter read `144/146` and implied
-> OSS was two minor gates from done. That was stale. A 2026-06-30 code-level security audit
-> (`SECURITY_AUDIT.md`) surfaced **1 CRITICAL, 4 HIGH, 5 MEDIUM, 5 LOW** findings, and the
-> OWASP LLM Top 10 (2025) — an authoritative source this project must map against — was
-> never captured in this ISA. Both are now first-class criteria: **M014** (audit remediation,
-> ISC-147–164) and the **OWASP LLM Top 10 Coverage** subsection (ISC-145–146). Most HIGH/MED
-> fixes exist in the **uncommitted** working tree (real HEAD `f9227f3`, ~663 lines across 8
-> files) — per the HANDOFF PROTOCOL that is worth **zero** until committed + probed, so those
-> ISCs stay `[ ]`. Aegir is NOT OSS-release-ready until M014 closes (esp. ISC-147 SSRF).
+> **RELEASE-READINESS NOTE (updated 2026-07-02, post-M014).** M014 (the 2026-06-30 audit
+> remediation, ISC-147–164) is **CLOSED** — all 18 findings merged + probed green across 3
+> worktree agents (WP-A `57ae0eb` / WP-B `d113527` / WP-C `9c96c97`), **CRITICAL SSRF (ISC-147)
+> fixed**, full `go test ./...` zero FAIL, `go vet` clean, `just build` + `just demo-flow-test`
+> (17/17 flows) green. OWASP LLM Top 10 (2025) mapped (ISC-145/146). Progress `164/167`.
+> **Remaining 5 open, none launch-blocking:** ISC-84/85 (demo script — restored this session,
+> was stripped from the release tree), ISC-165 (SSE origin-reflection, pre-1.0), ISC-32 (SSE
+> transport), ISC-86 (browser dashboard gate).
+>
+> **The one remaining gate is a human call: pushing to `origin/public`.** The branch is `ahead 17`
+> and has NOT been pushed. Nothing was pushed while the CRITICAL was open; it is now closed, so a
+> push is defensible — but that decision (and whether the SSRF discussion in this ISA/SECURITY_AUDIT
+> should ship publicly, per the "Honest Gaps Club" launch angle) belongs to David.
 
 > **HANDOFF PROTOCOL — MANDATORY, READ BEFORE ANY CODE WORK (esp. local-model handoff)**
 >
@@ -991,6 +995,8 @@ than claiming false coverage — consistent with the "Honest scope" principle.
   - **WP-B (Sonnet)** owns `internal/server/server.go` + `ratelimit.go` + `internal/auth/**` (+ tests): ISC-148, 150, 151, 153, 154, 157, 159.
   - **WP-C (Sonnet)** owns `internal/dashboard/**` + `internal/sanitizer/**` + `internal/redaction/**` (+ tests): ISC-158, 160, 161.
   All forbidden from editing `config.go` (fields exist), `go.mod` (no new deps), and each other's files. **Merge plan (serial, me):** as each returns, merge its worktree branch into `public`, re-run full suite unsandboxed, flip ISA checkboxes only on a passing probe at merged HEAD (ISC-164 gate). ISC-32 (SSE) + ISC-86 (browser) remain the deferred non-M014 gates.
+
+- 2026-07-02 (release-gate regression found + fixed): running the ISC-84 probe (`just demo-flow-test`) at the release gate failed with **exit 127** — `bin/demo-flow-test.sh` did not exist, though ISC-84/85 were marked `[x]` and the justfile (`demo-flow`, `demo-flow-test`) referenced it. Git history showed it was committed at `f17a401`/`36dd358` then **stripped by the OSS orphan-commit** (`91c8fcd`, "stripped binaries/scripts") — but the justfile references were never removed, so the release branch shipped two broken developer targets. Restored the 249-line script from `f17a401` (`5742fff`); `just demo-flow-test` now passes **17/17 flows** (approved 200s, auth 401s, adversarial 403s incl. injection/DAN/role-escalation/command-injection/secret-exfil/policy-bypass/template-injection, GDPR+PCI compliance 403s). ISC-84/85 are now genuinely satisfied, not just asserted. Lesson: "trust the build not the ISA" caught a `[x]` whose artifact had been deleted — the release gate must actually run the probe, not read the checkbox.
 
 - **M014 CLOSED (2026-07-02) — 3-agent worktree delegation, all 18 remediation ISCs merged + probed green.** Baseline `38c0943` → WP-A `57ae0eb` (mcp_proxy: ISC-147/149/152/155/156/162/163) → WP-B `d113527` (server+auth: ISC-148/150/151/153/154/157/159) → WP-C `9c96c97` (dashboard+compliance: ISC-158/160/161). Each merge followed by a full unsandboxed `go test ./...` (zero FAIL), `go build ./...`, `go vet ./...` clean. Every ISC credited only on a named probe passing at a committed merged HEAD (ISC-164 discipline). Net-new implementation: WP-C's 3 SSN split/partial-mask patterns (ISC-160, was genuinely open) + WP-A's `enforceResponseCompliance` extraction for testable audit ordering. Everything else was verification of already-landed baseline fixes. **CRITICAL ISC-147 (SSRF) is closed.** Two findings surfaced during delegation: ISC-165 (SSE origin-reflection, low-sev, open) and the ISC-155 prose reconciled to the stricter fail-closed code. Remaining open (3): ISC-165 (pre-1.0), ISC-32 (SSE transport), ISC-86 (browser dashboard gate) — none are launch blockers. **Not yet pushed to `origin/public`** — that is a deliberate human gate now that the CRITICAL is closed.
 
