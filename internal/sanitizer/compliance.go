@@ -294,6 +294,18 @@ func (cm *ComplianceManager) logComplianceEvent(result *ComplianceResult) {
 	cm.logger.LogSecurityEvent(event)
 }
 
+// ssnBoundarySep is a separator character class used only by ssn_split_boundary
+// (AEGIR-L-004). It extends the plain '-'/whitespace separator the primary
+// "ssn" pattern uses with common zero-width/invisible Unicode code points
+// (zero-width space/non-joiner/joiner, BOM, soft hyphen) that can end up
+// stitched into a value when content assembled from streamed/chunked upstream
+// fragments is rejoined with a stray artifact at the exact split point — e.g.
+// an SSN broken across two response chunks and rejoined as "123-45-​6789".
+// Requiring 2-4 repeats (see ssn_split_boundary below) keeps this pattern
+// disjoint from the primary "ssn" pattern, which matches only a single
+// separator character, so a normal well-formed SSN is never double-counted.
+const ssnBoundarySep = `[-\s\x{200B}\x{200C}\x{200D}\x{FEFF}\x{00AD}]`
+
 // initializePatterns precompiles all regex patterns at construction time
 func (cm *ComplianceManager) initializePatterns() {
 	cm.digitRe = regexp.MustCompile(`\D`)
@@ -301,6 +313,41 @@ func (cm *ComplianceManager) initializePatterns() {
 	cm.piiPatterns = map[string]compiledPattern{
 		"ssn": {
 			re:       regexp.MustCompile(`\b(?:\d{3}[-\s]\d{2}[-\s]\d{4}|\d{9})\b`),
+			severity: "high",
+		},
+		// AEGIR-L-004: SSN reassembled across a chunk/stream boundary with a
+		// stray extra separator (repeated whitespace/hyphen, or an invisible
+		// Unicode joiner) landing at the exact split point. Either separator
+		// position may carry the corruption, so the pattern is a two-armed
+		// alternation; requiring 2-4 repeats on at least one side keeps this
+		// disjoint from the strict single-separator "ssn" pattern above so a
+		// normal SSN is never double-counted.
+		"ssn_split_boundary": {
+			re: regexp.MustCompile(
+				`\b\d{3}` + ssnBoundarySep + `{2,4}\d{2}` + ssnBoundarySep + `{1,4}\d{4}\b` +
+					`|` +
+					`\b\d{3}` + ssnBoundarySep + `{1,4}\d{2}` + ssnBoundarySep + `{2,4}\d{4}\b`,
+			),
+			severity: "high",
+		},
+		// AEGIR-L-004: SSN already partially masked — some digit groups
+		// replaced with X/x/* while others remain real digits. A response
+		// that shows e.g. "XXX-XX-6789" or "123-45-XXXX" still exposes
+		// identifying digits and must not be waved through as "already
+		// redacted"; a *fully* masked value (all three groups masked) is
+		// intentionally excluded since that is genuinely-redacted, not a
+		// finding. Mirrors the existing "pan_masked" precedent for PCI data.
+		// Leading/trailing \b is deliberately omitted on the masked side of
+		// each pattern: '*' is a non-word rune, so a \b assertion immediately
+		// before/after a run of asterisks fails to match (no \w/\W
+		// transition) — the same reason the existing "pan_masked" PCI
+		// pattern (pciPatterns, below) carries no boundary assertions at all.
+		"ssn_partial_masked": {
+			re:       regexp.MustCompile(`[Xx*]{3}[-\s][Xx*]{2}[-\s]\d{4}\b`),
+			severity: "high",
+		},
+		"ssn_partial_visible": {
+			re:       regexp.MustCompile(`\b\d{3}[-\s]\d{2}[-\s][Xx*]{4}`),
 			severity: "high",
 		},
 		"email": {
