@@ -442,60 +442,28 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 	// Marshal response to JSON
 	responseJSON, _ := json.Marshal(response.Result)
 
-	// Scan response for compliance violations BEFORE sanitization
-	// (P1-3: Response compliance gap) — compliance acts as policy layer,
-	// sanitizer as enforcement layer. This ensures compliance policy is
-	// enforced on raw content before redaction occurs.
-	responseComplianceResult := p.complianceManager.ScanForCompliance(string(responseJSON))
-
-	// Single decision point for compliance handling (AEGIR-H-002). ORDER MATTERS:
-	//   1. Log the violation FIRST — including the block path — so the audit trail
-	//      never loses a regulated-data event to an early return.
-	//   2. Only ever log the redacted, per-type severity SUMMARY
-	//      (summarizeComplianceViolations), never the raw response body or the
-	//      redacted payload — no regulated values are written to the log
-	//      (AEGIR-L-003 / no data sprawl into the audit trail).
-	//   3. Apply the per-data-type action (ISC-28): block > redact > log-only.
-	if len(responseComplianceResult.Violations) > 0 {
-		p.logger.LogSecurityEvent(&logging.SecurityEvent{
-			Type:      "response_compliance_violation",
-			Severity:  responseComplianceResult.ComplianceRisk,
-			Message:   "Regulated data in model response",
-			Timestamp: time.Now(),
-			Details: map[string]string{
-				"violations": strconv.Itoa(len(responseComplianceResult.Violations)),
-				"risk_level": responseComplianceResult.ComplianceRisk,
-				// Redacted, aggregate-per-type summary only — no regulated values.
-				"data_types": summarizeComplianceViolations(responseComplianceResult.Violations),
+	// Response-compliance gate (AEGIR-H-002 / ISC-27/28/149/162). Extracted into
+	// enforceResponseCompliance so the "scan pre-redaction → log audit event →
+	// decide action" ordering is a single, unit-testable boundary. The audit event
+	// ALWAYS fires before a block, so a policy-blocked response is never lost from
+	// the audit trail (ISC-162 — the regression that motivated consolidating this).
+	decision := p.enforceResponseCompliance(string(responseJSON), response.Result)
+	switch decision.action {
+	case "block":
+		c.JSON(http.StatusForbidden, MCPResponse{
+			Error: &MCPError{
+				Code:    -32600,
+				Message: "Response blocked by compliance policy",
 			},
+			ID: req.ID,
 		})
-
-		switch p.responseComplianceAction(responseComplianceResult.Violations) {
-		case "block":
-			p.logger.Warn("MCP response blocked by per-type compliance policy",
-				"violations", len(responseComplianceResult.Violations),
-				"action", "block")
-			c.JSON(http.StatusForbidden, MCPResponse{
-				Error: &MCPError{
-					Code:    -32600,
-					Message: "Response blocked by compliance policy",
-				},
-				ID: req.ID,
-			})
-			return
-		case "redact":
-			// Enforce redaction on the raw response, then forward.
-			redacted := p.sanitizer.SanitizeContent(string(responseJSON))
-			if redacted.Sanitized != string(responseJSON) {
-				var redactedResult interface{}
-				if err := json.Unmarshal([]byte(redacted.Sanitized), &redactedResult); err == nil {
-					response.Result = redactedResult
-				}
-			}
-			c.JSON(http.StatusOK, response)
-			return
-		// "log-only": already logged; fall through to the default sanitizer pass.
-		}
+		return
+	case "redact":
+		// Raw response was redacted inside the gate; forward the masked result.
+		response.Result = decision.result
+		c.JSON(http.StatusOK, response)
+		return
+	// "allow" (no violations, or log-only): fall through to the sanitizer pass.
 	}
 
 	// Default path (no violations, or log-only): apply the sanitizer for
@@ -509,6 +477,71 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, response)
+}
+
+// responseComplianceDecision is the outcome of the response-compliance gate.
+// action is one of "block", "redact", or "allow"; result carries the
+// (possibly-redacted) response payload for the "redact" case.
+type responseComplianceDecision struct {
+	action string
+	result interface{}
+}
+
+// enforceResponseCompliance is the single decision point for regulated data in a
+// model response (AEGIR-H-002). ORDER MATTERS and is the whole point of this
+// function:
+//
+//  1. ISC-149 — scan the RAW, pre-redaction responseJSON so severity/data-type
+//     reflect the true finding even when the forwarded payload is later masked.
+//  2. ISC-162 — LOG the response_compliance_violation audit event FIRST, before
+//     any block path returns, so a policy-blocked response is never dropped from
+//     the audit trail. Only the redacted per-type SUMMARY is logged
+//     (summarizeComplianceViolations) — never raw or redacted regulated values
+//     (AEGIR-L-003 / no data sprawl into the audit trail).
+//  3. ISC-28 — apply the per-data-type action: block > redact > log-only.
+//
+// Returns "allow" when there are no violations or the policy is log-only.
+func (p *MCPProxy) enforceResponseCompliance(responseJSON string, currentResult interface{}) responseComplianceDecision {
+	res := p.complianceManager.ScanForCompliance(responseJSON)
+	if len(res.Violations) == 0 {
+		return responseComplianceDecision{action: "allow", result: currentResult}
+	}
+
+	// LOG FIRST — before any early-return block path (ISC-162).
+	p.logger.LogSecurityEvent(&logging.SecurityEvent{
+		Type:      "response_compliance_violation",
+		Severity:  res.ComplianceRisk,
+		Message:   "Regulated data in model response",
+		Timestamp: time.Now(),
+		Details: map[string]string{
+			"violations": strconv.Itoa(len(res.Violations)),
+			"risk_level": res.ComplianceRisk,
+			// Redacted, aggregate-per-type summary only — no regulated values.
+			"data_types": summarizeComplianceViolations(res.Violations),
+		},
+	})
+
+	switch p.responseComplianceAction(res.Violations) {
+	case "block":
+		p.logger.Warn("MCP response blocked by per-type compliance policy",
+			"violations", len(res.Violations),
+			"action", "block")
+		return responseComplianceDecision{action: "block"}
+	case "redact":
+		// Enforce redaction on the raw response, then forward the masked payload.
+		result := currentResult
+		redacted := p.sanitizer.SanitizeContent(responseJSON)
+		if redacted.Sanitized != responseJSON {
+			var redactedResult interface{}
+			if err := json.Unmarshal([]byte(redacted.Sanitized), &redactedResult); err == nil {
+				result = redactedResult
+			}
+		}
+		return responseComplianceDecision{action: "redact", result: result}
+	default:
+		// "log-only": already logged above; forward untouched via the sanitizer pass.
+		return responseComplianceDecision{action: "allow", result: currentResult}
+	}
 }
 
 // HandleServiceStatus returns the status of upstream services
