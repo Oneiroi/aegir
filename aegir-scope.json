@@ -1,6 +1,6 @@
 {
-  "version": "1.1",
-  "generated": "2026-06-24",
+  "version": "1.2",
+  "generated": "2026-07-02",
   "transport_layer_ceiling_percent": 62,
   "atlas_techniques": [
     {
@@ -136,6 +136,78 @@
     "Confused Deputy attacks",
     "OBO (On-Behalf-Of) authentication",
     "Agent-to-agent trust verification (see a2a section)"
+  ],
+  "owasp_llm_top10": [
+    {
+      "id": "LLM01",
+      "name": "Prompt Injection",
+      "status": "covered",
+      "owning_iscs": ["ISC-8", "ISC-22", "ISC-45", "ISC-46", "ISC-23", "ISC-24", "ISC-52"],
+      "mechanism": "Direct + indirect (tool-result) injection detection via base64/leet normalisation and an Aho-Corasick pattern layer, backed by an LLM judge for semantic/Crescendo-style attacks."
+    },
+    {
+      "id": "LLM02",
+      "name": "Sensitive Information Disclosure",
+      "status": "covered",
+      "owning_iscs": ["ISC-11", "ISC-27", "ISC-28", "ISC-60", "ISC-61", "ISC-62", "ISC-63", "ISC-64", "ISC-65", "ISC-17", "ISC-18", "ISC-19", "ISC-109"],
+      "mechanism": "PII/PHI/PCI redaction on both request and response paths plus secret detection (AWS, Azure SAS, GCP SA JSON, Slack tokens)."
+    },
+    {
+      "id": "LLM03",
+      "name": "Supply Chain",
+      "status": "partial",
+      "owning_iscs": ["ISC-107", "ISC-108", "ISC-115", "ISC-116", "ISC-111"],
+      "mechanism": "Covers the tool-integrity subset of supply chain risk — drift detection, tool collision, full-schema poisoning, typosquatting, and upstream mTLS; broad software/dependency supply chain security is out of scope."
+    },
+    {
+      "id": "LLM04",
+      "name": "Data & Model Poisoning",
+      "status": "partial",
+      "owning_iscs": ["ISC-55", "ISC-117"],
+      "mechanism": "Covers runtime RAG-poisoning intent detection and resource-content poisoning; training-time weights/pipeline poisoning is out of scope for a transport-layer proxy."
+    },
+    {
+      "id": "LLM05",
+      "name": "Improper Output Handling",
+      "status": "covered",
+      "owning_iscs": ["ISC-114", "ISC-110", "ISC-123"],
+      "mechanism": "ACE pattern detection (CWE-77/78/94/95) on response bodies, JSON-RPC schema validation, and large-response anomaly detection."
+    },
+    {
+      "id": "LLM06",
+      "name": "Excessive Agency",
+      "status": "partial",
+      "owning_iscs": ["ISC-119", "ISC-112", "ISC-48", "ISC-121", "ISC-122", "ISC-113"],
+      "mechanism": "Human-approval gate, tool-call sequence anomaly detection, tool-argument abuse checks, recon rate-limiting, and OAuth scope auditing; A2A trust delegation is documented as not-covered (see a2a section)."
+    },
+    {
+      "id": "LLM07",
+      "name": "System Prompt Leakage",
+      "status": "covered",
+      "owning_iscs": ["ISC-25", "ISC-53", "ISC-33", "ISC-93"],
+      "mechanism": "Meta-prompt-extraction patterns (AML.T0056) block extraction attempts; judge reasoning never leaks to the client."
+    },
+    {
+      "id": "LLM08",
+      "name": "Vector & Embedding Weaknesses",
+      "status": "out-of-scope",
+      "owning_iscs": [],
+      "mechanism": "Requires model-internal or embedding-store access, which is explicitly excluded from a transport-layer proxy's remit."
+    },
+    {
+      "id": "LLM09",
+      "name": "Misinformation",
+      "status": "out-of-scope",
+      "owning_iscs": [],
+      "mechanism": "Model output quality and hallucination are not a transport-proxy concern."
+    },
+    {
+      "id": "LLM10",
+      "name": "Unbounded Consumption",
+      "status": "covered",
+      "owning_iscs": ["ISC-14", "ISC-56", "ISC-2", "ISC-3", "ISC-123"],
+      "mechanism": "Identity- and IP-keyed rate limiting, memory-bounded limiter, and content-length anomaly detection guard against DoS / Denial-of-Wallet."
+    }
   ],
   "a2a": {
     "covered": false,

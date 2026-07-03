@@ -1,7 +1,7 @@
 # Aegir — Security Scope Boundary
 
-**Version:** 1.1  
-**Generated:** 2026-06-24  
+**Version:** 1.2  
+**Generated:** 2026-07-02  
 **Machine-readable companion:** `aegir-scope.json`  
 **Satisfies:** ISC-13, ISC-101, ISC-113
 
@@ -50,6 +50,25 @@ These three classes were above the ceiling. The LLM judge layer (M009, shipped) 
 | POLY.003 | Leet Speak Bypass | implemented | Leet normalisation pass shipped (M008, ISC-24) |
 
 **Status key:** `implemented` = active and confirmed in code | `partial` = mechanism exists with documented gaps | `planned` = scheduled in a named milestone | `not_covered` = out of scope by design
+
+---
+
+## OWASP LLM Top 10 (2025) Coverage
+
+This is the second authoritative coverage mapping (after MITRE ATLAS above). Out-of-scope items are declared honestly here rather than falsely claimed as covered.
+
+| OWASP 2025 | Status | Owning ISCs | Mechanism |
+|---|---|---|---|
+| LLM01 Prompt Injection | covered | ISC-8, ISC-22, ISC-45, ISC-46, ISC-23, ISC-24, ISC-52 | Direct + indirect (tool-result) injection detection via base64/leet normalisation and an Aho-Corasick pattern layer, backed by an LLM judge for semantic/Crescendo-style attacks |
+| LLM02 Sensitive Information Disclosure | covered | ISC-11, ISC-27, ISC-28, ISC-60, ISC-61, ISC-62, ISC-63, ISC-64, ISC-65, ISC-17, ISC-18, ISC-19, ISC-109 | PII/PHI/PCI redaction (request + response) plus secret detection |
+| LLM03 Supply Chain | partial | ISC-107, ISC-108, ISC-115, ISC-116, ISC-111 | Tool-integrity subset only (drift, collision, full-schema poisoning, typosquatting, upstream mTLS); broad software/dependency supply chain is out of scope |
+| LLM04 Data & Model Poisoning | partial | ISC-55, ISC-117 | Runtime RAG-poisoning intent + resource-content poisoning; training-time weights/pipeline poisoning is out of scope |
+| LLM05 Improper Output Handling | covered | ISC-114, ISC-110, ISC-123 | ACE patterns (CWE-77/78/94/95) on response bodies, JSON-RPC schema validation, large-response anomaly detection |
+| LLM06 Excessive Agency | partial | ISC-119, ISC-112, ISC-48, ISC-121, ISC-122, ISC-113 | Human-approval gate, tool-call sequence anomaly, tool-arg abuse, recon rate-limit, OAuth scope audit; A2A trust delegation documented not-covered |
+| LLM07 System Prompt Leakage | covered | ISC-25, ISC-53, ISC-33, ISC-93 | Meta-prompt-extraction patterns (AML.T0056); judge reasoning never leaks to the client |
+| LLM08 Vector & Embedding Weaknesses | out-of-scope | — | Requires model-internal/embedding access, explicitly excluded |
+| LLM09 Misinformation | out-of-scope | — | Model output-quality/hallucination is not a transport-proxy concern |
+| LLM10 Unbounded Consumption | covered | ISC-14, ISC-56, ISC-2, ISC-3, ISC-123 | Identity + IP rate limiting, memory-bounded limiter, content-length anomaly (DoS / Denial-of-Wallet) |
 
 ---
 
