@@ -2,11 +2,14 @@ package server
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/aegishjalmur/aegir/internal/config"
 	"github.com/aegishjalmur/aegir/internal/logging"
+	"github.com/gin-gonic/gin"
 )
 
 // newTestRateLimiter constructs a RateLimiter suitable for unit tests.
@@ -102,5 +105,71 @@ func TestRateLimiterRotation(t *testing.T) {
 
 	if got := len(rl.clients); got > cap {
 		t.Fatalf("final map size %d exceeds cap %d", got, cap)
+	}
+}
+
+// TestRateLimiterIgnoresUntrustedXFF is the ISC-153 / AEGIR-M-002 probe: the
+// rate limiter must key on the direct RemoteAddr — never a client-supplied
+// X-Forwarded-For header — unless the immediate peer is in TrustedProxies.
+// Otherwise an attacker can bypass the limiter entirely by rotating the
+// spoofed header value on every request.
+func TestRateLimiterIgnoresUntrustedXFF(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	cases := []struct {
+		name           string
+		trustedProxies []string
+		remoteAddr     string
+		xff            string
+		want           string
+	}{
+		{
+			name:           "no_trusted_proxies_configured_ignores_spoofed_xff",
+			trustedProxies: nil,
+			remoteAddr:     "203.0.113.5:54321",
+			xff:            "1.2.3.4",
+			want:           "203.0.113.5",
+		},
+		{
+			name:           "untrusted_peer_ignores_spoofed_xff",
+			trustedProxies: []string{"10.0.0.9"}, // does not match remoteAddr below
+			remoteAddr:     "203.0.113.5:54321",
+			xff:            "1.2.3.4",
+			want:           "203.0.113.5",
+		},
+		{
+			name:           "trusted_peer_honours_xff",
+			trustedProxies: []string{"203.0.113.5"},
+			remoteAddr:     "203.0.113.5:54321",
+			xff:            "1.2.3.4",
+			want:           "1.2.3.4",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.RateLimit{
+				Enabled:         true,
+				RequestsPerMin:  6000,
+				BurstSize:       1000,
+				CleanupInterval: 3600,
+				TrustedProxies:  tc.trustedProxies,
+			}
+			logger := testLogger()
+			rl := NewRateLimiter(cfg, logger)
+			defer rl.Stop()
+
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.RemoteAddr = tc.remoteAddr
+			req.Header.Set("X-Forwarded-For", tc.xff)
+			c.Request = req
+
+			got := rl.getClientIP(c)
+			if got != tc.want {
+				t.Errorf("getClientIP() = %q, want %q (trustedProxies=%v)", got, tc.want, tc.trustedProxies)
+			}
+		})
 	}
 }

@@ -161,6 +161,126 @@ func TestOAuthLoginRedirects_MissingProvider(t *testing.T) {
 	}
 }
 
+// newTestManagerWithIssAud creates an auth Manager with a configured JWT
+// issuer and audience, used to exercise the AEGIR-H-004 / ISC-151 iss/aud
+// enforcement path in validateJWT.
+func newTestManagerWithIssAud(t *testing.T) *Manager {
+	t.Helper()
+
+	logger, err := logging.New(config.Logging{
+		Level:           "error",
+		Format:          "text",
+		File:            "",
+		HMACKey:         "test-hmac-key-that-is-at-least-32-chars!!",
+		IntegrityChecks: false,
+	})
+	if err != nil {
+		t.Fatalf("newTestManagerWithIssAud: failed to create logger: %v", err)
+	}
+
+	cfg := config.Auth{
+		JWT: config.JWT{
+			Secret:            "iss-aud-test-secret-key-32-characters!!",
+			Issuer:            "aegir-primary",
+			Audience:          "aegir-clients",
+			ExpirationTime:    time.Hour,
+			RefreshExpiration: 24 * time.Hour,
+		},
+	}
+
+	mgr, err := New(cfg, logger)
+	if err != nil {
+		t.Fatalf("newTestManagerWithIssAud: failed to create manager: %v", err)
+	}
+	return mgr
+}
+
+// craftJWTWithIssAud builds a signed JWT with the given issuer/audience,
+// signed with the same secret configured in newTestManagerWithIssAud.
+func craftJWTWithIssAud(t *testing.T, issuer, audience string, includeAudience bool) string {
+	t.Helper()
+	secret := []byte("iss-aud-test-secret-key-32-characters!!")
+
+	registered := jwt.RegisteredClaims{
+		Issuer:    issuer,
+		Subject:   "test-user",
+		IssuedAt:  jwt.NewNumericDate(time.Now()),
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+	}
+	if includeAudience {
+		registered.Audience = jwt.ClaimStrings{audience}
+	}
+
+	claims := Claims{
+		UserID:           "test-user",
+		Username:         "testuser",
+		Email:            "test@example.com",
+		Roles:            []string{"user"},
+		RegisteredClaims: registered,
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := token.SignedString(secret)
+	if err != nil {
+		t.Fatalf("craftJWTWithIssAud: %v", err)
+	}
+	return signed
+}
+
+// TestJWTIssuerAudienceValidation is the ISC-151 / AEGIR-H-004 probe:
+// validateJWT (exercised via AuthMiddleware) must enforce the configured
+// issuer and audience beyond signing-method + signature — a token with the
+// right signature but the wrong issuer or audience must be rejected 401.
+func TestJWTIssuerAudienceValidation(t *testing.T) {
+	mgr := newTestManagerWithIssAud(t)
+
+	cases := []struct {
+		name       string
+		token      string
+		wantStatus int
+	}{
+		{
+			name:       "correct_issuer_and_audience_accepted",
+			token:      craftJWTWithIssAud(t, "aegir-primary", "aegir-clients", true),
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "wrong_issuer_rejected_401",
+			token:      craftJWTWithIssAud(t, "some-other-service", "aegir-clients", true),
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "wrong_audience_rejected_401",
+			token:      craftJWTWithIssAud(t, "aegir-primary", "some-other-audience", true),
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "missing_audience_rejected_401",
+			token:      craftJWTWithIssAud(t, "aegir-primary", "", false),
+			wantStatus: http.StatusUnauthorized,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			router := gin.New()
+			router.GET("/probe", mgr.AuthMiddleware(), func(c *gin.Context) {
+				c.Status(http.StatusOK)
+			})
+
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/probe", nil)
+			req.Header.Set("Authorization", "Bearer "+tc.token)
+			router.ServeHTTP(w, req)
+
+			if w.Code != tc.wantStatus {
+				t.Errorf("got status %d want %d; body=%s", w.Code, tc.wantStatus, w.Body.String())
+			}
+		})
+	}
+}
+
 // TestAPIKeyAuthentication verifies that a valid API key in the X-API-Key header
 // is accepted by AuthMiddleware (ISC-69).
 func TestAPIKeyAuthentication(t *testing.T) {

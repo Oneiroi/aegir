@@ -95,7 +95,10 @@ func (h *Handler) RegisterBegin(c *gin.Context) {
 		DisplayName string `json:"display_name"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request: " + err.Error()})
+		// AEGIR-L-003: log the parse error server-side only; the client gets a
+		// generic message so request-body internals never leak in the response.
+		h.logger.Warn("webauthn register-begin: invalid request body", "error", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
 
@@ -143,8 +146,11 @@ func (h *Handler) RegisterFinish(c *gin.Context) {
 
 	credential, err := h.webauthn.FinishRegistration(user, *session, c.Request)
 	if err != nil {
+		// AEGIR-L-003: the go-webauthn library's error text can include internal
+		// ceremony/validation detail; log it server-side and return a generic
+		// message to the client.
 		h.logger.Warn("webauthn finish-registration failed", "user_id", userID, "error", err)
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "registration verification failed: " + err.Error()})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "registration verification failed"})
 		return
 	}
 
@@ -167,7 +173,8 @@ func (h *Handler) LoginBegin(c *gin.Context) {
 		UserID string `json:"user_id" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request: " + err.Error()})
+		h.logger.Warn("webauthn login-begin: invalid request body", "error", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
 
@@ -182,8 +189,9 @@ func (h *Handler) LoginBegin(c *gin.Context) {
 
 	assertion, session, err := h.webauthn.BeginLogin(user)
 	if err != nil {
+		// AEGIR-L-003: generic response to the client; full detail server-side only.
 		h.logger.Warn("webauthn begin-login failed", "user_id", req.UserID, "error", err)
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "login ceremony failed: " + err.Error()})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "login ceremony failed"})
 		return
 	}
 
@@ -217,8 +225,9 @@ func (h *Handler) LoginFinish(c *gin.Context) {
 
 	credential, err := h.webauthn.FinishLogin(user, *session, c.Request)
 	if err != nil {
+		// AEGIR-L-003: generic response to the client; full detail server-side only.
 		h.logger.Warn("webauthn finish-login failed", "user_id", userID, "error", err)
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "login verification failed: " + err.Error()})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "login verification failed"})
 		return
 	}
 

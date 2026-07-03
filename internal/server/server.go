@@ -318,8 +318,10 @@ func (s *MCPFirewall) securityHeaders() gin.HandlerFunc {
 
 // oauthScopeAuditMiddleware inspects Bearer JWT tokens on incoming MCP requests
 // and fires an excessive_scope_detected security event when the token's scope
-// or scp claim contains a prohibited value (ISC-122). If enforcement is enabled,
-// returns 403 with prohibited_scope security event.
+// or scp claim contains a prohibited value (ISC-122). If enforcement is enabled
+// (oauth.enforce_scopes / OAuthScopeAuditConfig.Enforcement), a prohibited scope
+// returns 403 with an excessive_scope_blocked security event (ISC-148,
+// AEGIR-H-001) instead of merely logging and continuing.
 func (s *MCPFirewall) oauthScopeAuditMiddleware() gin.HandlerFunc {
 	cfg := s.config.Security.OAuthScopeAudit
 	return func(c *gin.Context) {
@@ -377,7 +379,7 @@ func (s *MCPFirewall) oauthScopeAuditMiddleware() gin.HandlerFunc {
 		}
 		if forbiddenScope != "" && cfg.Enforcement {
 			s.logger.LogSecurityEvent(&logging.SecurityEvent{
-				Type:      "prohibited_scope",
+				Type:      "excessive_scope_blocked",
 				Severity:  "high",
 				Message:   "JWT token rejected: contains prohibited OAuth scope",
 				ClientIP:  c.ClientIP(),
@@ -388,7 +390,7 @@ func (s *MCPFirewall) oauthScopeAuditMiddleware() gin.HandlerFunc {
 				},
 			})
 			c.JSON(403, gin.H{
-				"error":   "prohibited_scope",
+				"error":   "excessive_scope_blocked",
 				"message": "token contains prohibited OAuth scope",
 			})
 			c.Abort()
