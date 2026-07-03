@@ -5,7 +5,7 @@ project: Aegir
 effort: E4
 effort_source: classifier
 phase: execute
-progress: 160/167
+progress: 164/167
 mode: interactive
 started: 2026-05-13T21:00:00Z
 updated: 2026-07-02T00:00:00Z
@@ -420,13 +420,13 @@ than claiming false coverage — consistent with the "Honest scope" principle.
 - [x] ISC-155: [AEGIR-M-004] WebSocket `CheckOrigin` rejects a present-but-unlisted Origin; a **present** Origin is required (baseline fails *closed* — empty Origin is rejected, "Require Origin header for security"); empty allowlist permits a present Origin — probe: `TestWebSocketOriginRejectsUnlisted` — **DONE 2026-07-02** (WP-A/Opus, merged `57ae0eb`). **Reconciled:** the prior ISA prose said empty Origin "passes by design"; the code is actually *stricter* (rejects empty Origin), so the criterion is corrected to the fail-closed reality — this supersedes the `1a5ecbd` fail-open note for the WS path.
 - [x] ISC-156: [AEGIR-M-005] `tools/call` response bodies are scanned for SSRF egress targets (URLs pointing at internal/link-local/loopback), a distinct surface from request-arg SSRF (ISC-12) — probe: `TestToolResponseSSRFScan` — **DONE 2026-07-02** (WP-A/Opus, merged `57ae0eb`; RFC-1918 egress URLs that bypass the IOC sanitizer blocked by the egress layer, `detail="ssrf target in tool result"`)
 - [x] ISC-157: [AEGIR-L-001] Dashboard CSP removes `unsafe-inline`; inline scripts externalised or nonce-gated — probe: `TestDashboardCSPNoUnsafeInline` — **DONE 2026-07-02** (WP-B/Sonnet, merged `d113527`; server security-headers middleware emits CSP without `unsafe-inline`)
-- [ ] ISC-158: [AEGIR-L-002] Login form password field uses `autocomplete="new-password"`/`off`; no pre-filled or autocompleting credential inputs — probe: `grep -n 'autocomplete' internal/dashboard/web.go` shows only safe values (**WORKING-TREE**)
+- [x] ISC-158: [AEGIR-L-002] Login form password field uses `autocomplete="new-password"`/`off`; no pre-filled or autocompleting credential inputs — probe: `TestLoginFormAutocompleteSafe` — **DONE 2026-07-02** (WP-C/Sonnet, merged `9c96c97`; impl already in baseline, named probe added asserting rendered login HTML has only safe autocomplete values)
 - [x] ISC-159: [AEGIR-L-003] Client-facing error responses do not leak internal detail (stack traces, filesystem paths, version, upstream identity) — probe: `TestErrorResponseNoInternalLeak` — **DONE 2026-07-02** (WP-B/Sonnet, merged `d113527`; malformed-JSON + bad-attestation paths return generic errors)
-- [ ] ISC-160: [AEGIR-L-004] Response compliance scan catches partially-redacted / split PII (e.g. SSN across chunk boundaries) — probe: `TestPartialRedactionCoverage` (**OPEN**)
-- [ ] ISC-161: [AEGIR-L-005] Dashboard auto-refresh cannot sustain unauthenticated persistent monitoring — session idle-timeout enforced — probe: `TestDashboardIdleTimeout` (**WORKING-TREE — idle-timeout landed per ISSUES.md**)
+- [x] ISC-160: [AEGIR-L-004] Response compliance scan catches partially-redacted / split PII (e.g. SSN across chunk boundaries) — probe: `TestPartialRedactionCoverage` — **DONE 2026-07-02** (WP-C/Sonnet, merged `9c96c97`; genuinely open — added 3 SSN patterns to `compliance.go`: `ssn_split_boundary` (repeated whitespace/hyphen/zero-width joiners at chunk reassembly), `ssn_partial_masked` `XXX-XX-6789`, `ssn_partial_visible` `123-45-XXXX`; 9-subtest probe incl. anti-flag on fully-masked placeholder + no double-count on normal SSN)
+- [x] ISC-161: [AEGIR-L-005] Dashboard auto-refresh cannot sustain unauthenticated persistent monitoring — session idle-timeout enforced — probe: `TestDashboardIdleTimeout` — **DONE 2026-07-02** (WP-C/Sonnet, merged `9c96c97`; impl in baseline, named probe added)
 - [x] ISC-162: [ISSUES.md #1] Compliance-block path emits its `response_compliance_violation` (ISC-27) audit event BEFORE returning 403 — probe: `TestComplianceBlockAudited` asserts a policy-blocked response produces the audit event — **DONE 2026-07-02** (WP-A/Opus, merged `57ae0eb`; the duplicate switch was already consolidated in the baseline; WP-A extracted `enforceResponseCompliance` into a unit-testable boundary — scan-pre-redaction → log audit → decide action — behavior-preserving, and proved the log-before-block ordering)
 - [x] ISC-163: [ISSUES.md #2] Anti: the SSRF integer/hex/octal branch is not dead code that over-claims — probe: `TestSSRFIntegerNotation` blocks `http://0x7F000001/` and `http://0177.0000.0000.0001/` — **DONE 2026-07-02** (WP-A/Opus, merged `57ae0eb`; `parseIntegerIP` decodes both forms to canonical loopback and blocks — the branch is functional, ISSUES.md #2's "dead code" concern does not hold against the current baseline; probe proves it)
-- [ ] ISC-164: Anti: no M014 finding is marked `[x]` while its fix is uncommitted or lacks a named passing probe at committed HEAD — the audit's own findings must clear the build-verification gate, not a working-tree claim — probe: for each `[x]` ISC-147–163, its named probe passes against committed (merged) code — **HOLDING (partially satisfied):** every `[x]` M014 ISC so far (147/149/152/155/156/162/163) was credited only after its probe passed at a committed merged HEAD (`57ae0eb`), re-run unsandboxed by the managing agent — not on a working-tree claim. Closes when all M014 ISCs are merged + the final full-suite gate is green.
+- [x] ISC-164: Anti: no M014 finding is marked `[x]` while its fix is uncommitted or lacks a named passing probe at committed HEAD — the audit's own findings must clear the build-verification gate, not a working-tree claim — probe: for each `[x]` ISC-147–163, its named probe passes against committed (merged) code — **DONE 2026-07-02** (all M014 remediation ISCs 147–163 merged across WP-A `57ae0eb` / WP-B `d113527` / WP-C `9c96c97`; each credited only after its named probe passed at a committed merged HEAD, re-run unsandboxed by the managing agent; final full-suite gate at `9c96c97` = zero FAIL, `go vet` clean, `go build ./...` clean. No working-tree claims were credited.)
 - [ ] ISC-165: [AEGIR-M-001 follow-up] SSE CORS enforces a strict allowlist rather than reflecting an arbitrary request `Origin` — `corsOrigin` currently falls back to echoing the request Origin when it is not in `AllowedOrigins` (never `*`, so ISC-152 holds, but origin-reflection is weaker than allowlist enforcement) — probe: `TestSSECORSStrictAllowlist` — an unlisted Origin receives no `Access-Control-Allow-Origin` reflecting it (**OPEN — surfaced by WP-A during ISC-152; low severity, not a launch blocker but should close pre-1.0**)
 
 ## Test Strategy
@@ -743,6 +743,12 @@ than claiming false coverage — consistent with the "Honest scope" principle.
   check: no M014 ISC marked done while fix uncommitted or probe absent at committed HEAD
   threshold: probe passes against committed code
   tool: git stash && go test -run <probe> ./... && git stash pop
+
+- isc: ISC-165
+  type: integration
+  check: SSE CORS does not reflect an unlisted request Origin
+  threshold: unlisted Origin receives no reflecting ACAO header
+  tool: go test -run TestSSECORSStrictAllowlist
 ```
 
 ## Features
@@ -914,6 +920,11 @@ than claiming false coverage — consistent with the "Honest scope" principle.
   learned: authoritative-source coverage (OWASP alongside MITRE ATLAS) and external-audit findings are not "docs" — they are criteria; leaving them outside the ISA let the ISA report a release-ready number while a CRITICAL was open. An ISA that is the system of record must ingest every authority's threat taxonomy and every audit finding as ISCs, and must mark uncommitted fixes as not-done
   criterion_now: ISC-145/146 (OWASP mapping + machine-readable block), ISC-147–164 (M014 audit remediation), and ISC-164 (anti: no M014 ISC done until committed + probed) — the ISA now derives progress from committed reality, not working-tree intent
 
+- 2026-07-02 | conjectured: the M014 audit remediation was mostly unimplemented "OPEN" work needing fresh code, so the working tree was near-zero progress
+  refuted_by: worktree delegation found the baseline (`38c0943`) had ALREADY absorbed most fixes — SSRF resolved-destination + integer-notation parsing were functional (not the dead code ISSUES.md feared), the compliance duplicate-switch was already consolidated, and autocomplete/idle-timeout/CSP/JWT/WebAuthn-binding all landed in `fb3e808`; the genuinely-open work was ISC-160 (partial/split PII) alone, plus a testability refactor
+  learned: the true M014 gap was not implementation but VERIFICATION — the fixes existed uncommitted-then-committed but had no named probes, so they were unprovable and the ISA honestly could not credit them; "implemented ≠ done" cuts both ways (uncommitted green work is also invisible until a probe pins it at a committed HEAD)
+  criterion_now: every M014 ISC now carries a named probe passing at a committed merged HEAD (ISC-164); progress reflects proven-and-committed, and the delegation model is worktree-isolated with the managing agent as the serial merge+verify gate
+
 ## Verification
 
 **Confirmed (2026-06-16, working tree — security-review hardening):**
@@ -980,6 +991,8 @@ than claiming false coverage — consistent with the "Honest scope" principle.
   - **WP-B (Sonnet)** owns `internal/server/server.go` + `ratelimit.go` + `internal/auth/**` (+ tests): ISC-148, 150, 151, 153, 154, 157, 159.
   - **WP-C (Sonnet)** owns `internal/dashboard/**` + `internal/sanitizer/**` + `internal/redaction/**` (+ tests): ISC-158, 160, 161.
   All forbidden from editing `config.go` (fields exist), `go.mod` (no new deps), and each other's files. **Merge plan (serial, me):** as each returns, merge its worktree branch into `public`, re-run full suite unsandboxed, flip ISA checkboxes only on a passing probe at merged HEAD (ISC-164 gate). ISC-32 (SSE) + ISC-86 (browser) remain the deferred non-M014 gates.
+
+- **M014 CLOSED (2026-07-02) — 3-agent worktree delegation, all 18 remediation ISCs merged + probed green.** Baseline `38c0943` → WP-A `57ae0eb` (mcp_proxy: ISC-147/149/152/155/156/162/163) → WP-B `d113527` (server+auth: ISC-148/150/151/153/154/157/159) → WP-C `9c96c97` (dashboard+compliance: ISC-158/160/161). Each merge followed by a full unsandboxed `go test ./...` (zero FAIL), `go build ./...`, `go vet ./...` clean. Every ISC credited only on a named probe passing at a committed merged HEAD (ISC-164 discipline). Net-new implementation: WP-C's 3 SSN split/partial-mask patterns (ISC-160, was genuinely open) + WP-A's `enforceResponseCompliance` extraction for testable audit ordering. Everything else was verification of already-landed baseline fixes. **CRITICAL ISC-147 (SSRF) is closed.** Two findings surfaced during delegation: ISC-165 (SSE origin-reflection, low-sev, open) and the ISC-155 prose reconciled to the stricter fail-closed code. Remaining open (3): ISC-165 (pre-1.0), ISC-32 (SSE transport), ISC-86 (browser dashboard gate) — none are launch blockers. **Not yet pushed to `origin/public`** — that is a deliberate human gate now that the CRITICAL is closed.
 
 - ISC-145/146 CLOSED (2026-07-02): Sonnet subagent added the `owasp_llm_top10` array (10 entries, `version` 1.1→1.2) to `aegir-scope.json` + a `## OWASP LLM Top 10 (2025) Coverage` table to `SCOPE.md`. Independently re-verified by the primary (not agent self-report): `jq -e '.owasp_llm_top10|length==10'`, `jq -e '[.owasp_llm_top10[]|select(.status=="out-of-scope")]|length>=2'`, and `jq -e '[.owasp_llm_top10[]|select(.status=="covered")|select((.owning_iscs|length)==0)]|length==0'` all exit 0. LLM01 7 ISCs / LLM02 13 / LLM03 5 / LLM04 2 / LLM05 3 / LLM06 6 / LLM07 4 / LLM08 0 (OOS) / LLM09 0 (OOS) / LLM10 5. Progress 144→146/166. Files uncommitted (working-tree), pending the OSS commit alongside M014.
 
