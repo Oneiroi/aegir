@@ -5,7 +5,7 @@ project: Aegir
 effort: E4
 effort_source: classifier
 phase: execute
-progress: 164/167
+progress: 165/167
 mode: interactive
 started: 2026-05-13T21:00:00Z
 updated: 2026-07-02T00:00:00Z
@@ -447,7 +447,7 @@ than claiming false coverage — consistent with the "Honest scope" principle.
 - [x] ISC-162: [ISSUES.md #1] Compliance-block path emits its `response_compliance_violation` (ISC-27) audit event BEFORE returning 403 — probe: `TestComplianceBlockAudited` asserts a policy-blocked response produces the audit event — **DONE 2026-07-02** (WP-A/Opus, merged `57ae0eb`; the duplicate switch was already consolidated in the baseline; WP-A extracted `enforceResponseCompliance` into a unit-testable boundary — scan-pre-redaction → log audit → decide action — behavior-preserving, and proved the log-before-block ordering)
 - [x] ISC-163: [ISSUES.md #2] Anti: the SSRF integer/hex/octal branch is not dead code that over-claims — probe: `TestSSRFIntegerNotation` blocks `http://0x7F000001/` and `http://0177.0000.0000.0001/` — **DONE 2026-07-02** (WP-A/Opus, merged `57ae0eb`; `parseIntegerIP` decodes both forms to canonical loopback and blocks — the branch is functional, ISSUES.md #2's "dead code" concern does not hold against the current baseline; probe proves it)
 - [x] ISC-164: Anti: no M014 finding is marked `[x]` while its fix is uncommitted or lacks a named passing probe at committed HEAD — the audit's own findings must clear the build-verification gate, not a working-tree claim — probe: for each `[x]` ISC-147–163, its named probe passes against committed (merged) code — **DONE 2026-07-02** (all M014 remediation ISCs 147–163 merged across WP-A `57ae0eb` / WP-B `d113527` / WP-C `9c96c97`; each credited only after its named probe passed at a committed merged HEAD, re-run unsandboxed by the managing agent; final full-suite gate at `9c96c97` = zero FAIL, `go vet` clean, `go build ./...` clean. No working-tree claims were credited.)
-- [ ] ISC-165: [AEGIR-M-001 follow-up] SSE CORS enforces a strict allowlist rather than reflecting an arbitrary request `Origin` — `corsOrigin` currently falls back to echoing the request Origin when it is not in `AllowedOrigins` (never `*`, so ISC-152 holds, but origin-reflection is weaker than allowlist enforcement) — probe: `TestSSECORSStrictAllowlist` — an unlisted Origin receives no `Access-Control-Allow-Origin` reflecting it (**OPEN — surfaced by WP-A during ISC-152; low severity, not a launch blocker but should close pre-1.0**)
+- [x] ISC-165: [AEGIR-M-001 follow-up] SSE CORS enforces a strict allowlist rather than reflecting an arbitrary request `Origin` — probe: `TestSSECORSStrictAllowlist` — an unlisted Origin receives no `Access-Control-Allow-Origin` reflecting it — **DONE 2026-07-04** (Sonnet worktree, merged `b165841`; `corsOrigin` now returns only `corsAllowedOrigin` exact-match — deleted the `c.GetHeader("Origin")` reflection fallback, so unlisted/empty-allowlist/no-Origin all get NO ACAO; 4-case probe passes, ISC-152 + ISC-155 confirmed not regressed; re-verified unsandboxed)
 
 ## Test Strategy
 
