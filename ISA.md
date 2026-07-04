@@ -15,10 +15,12 @@ updated: 2026-07-02T00:00:00Z
 > remediation, ISC-147–164) is **CLOSED** — all 18 findings merged + probed green across 3
 > worktree agents (WP-A `57ae0eb` / WP-B `d113527` / WP-C `9c96c97`), **CRITICAL SSRF (ISC-147)
 > fixed**, full `go test ./...` zero FAIL, `go vet` clean, `just build` + `just demo-flow-test`
-> (17/17 flows) green. OWASP LLM Top 10 (2025) mapped (ISC-145/146). Progress `164/167`.
-> **Remaining 5 open, none launch-blocking:** ISC-84/85 (demo script — restored this session,
-> was stripped from the release tree), ISC-165 (SSE origin-reflection, pre-1.0), ISC-32 (SSE
-> transport), ISC-86 (browser dashboard gate).
+> (17/17 flows) green. OWASP LLM Top 10 (2025) + OWASP API Security Top 10 (2023) mapped. Progress
+> `165/167`. **Only 2 items not `[x]`, neither launch-blocking:** ISC-86 `[DEFERRED-VERIFY]`
+> (dashboard + `/auth/login` functionally proven 200+token; browser-render gate needs Interceptor,
+> not installed here) and ISC-32 (MCP-native SSE progress — a deliberately-deferred post-v1 feature,
+> the HTTP-header hold is sufficient for v1 per Decision 2026-06-18). ISC-165 (SSE strict-origin)
+> closed 2026-07-04.
 >
 > **The one remaining gate is a human call: pushing to `origin/public`.** The branch is `ahead 17`
 > and has NOT been pushed. Nothing was pushed while the CRITICAL was open; it is now closed, so a
