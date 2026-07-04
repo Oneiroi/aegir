@@ -1700,12 +1700,15 @@ func sanitizerVerdictToJudge(result *sanitizer.SanitizationResult) judge.Verdict
 
 // corsOrigin returns the appropriate CORS origin header value for SSE endpoints.
 // Returns empty string if CORS should not be set.
+//
+// ISC-165 (AEGIR-M-001 follow-up): STRICT allowlist only. An unlisted request
+// Origin (including the empty-allowlist / no-Origin cases) must never be
+// reflected back in Access-Control-Allow-Origin — a security gateway should
+// not echo an origin it hasn't been explicitly told to trust. This never
+// falls back to the raw Origin header; the only source of truth is
+// Security.AllowedOrigins exact match.
 func (p *MCPProxy) corsOrigin(c *gin.Context) string {
-	if origin := p.corsAllowedOrigin(c); origin != "" {
-		return origin
-	}
-	// Fall back to request Origin header if present
-	return c.GetHeader("Origin")
+	return p.corsAllowedOrigin(c)
 }
 
 // corsAllowedOrigin returns the configured allowed origin, or empty string
