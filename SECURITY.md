@@ -2,7 +2,7 @@
 
 ## Reporting a Vulnerability
 
-Security issues should be reported to **d.busby@saiweb.co.uk** with the subject line
+Security issues should be reported to **security@oneiroi.co.uk** with the subject line
 `[Aegir Security]`. Please include:
 
 - A description of the issue and its potential impact
