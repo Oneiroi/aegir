@@ -83,7 +83,7 @@ Techniques targeting these surfaces are **structurally out of scope** for Aegir 
 |----|-----------|----------|-----------|-------|
 | AML.T0050 | Execute LLM Prompt | PARTIAL | Auth controls who can submit; rate limiting | No semantic intent classification |
 | AML.T0051.000 | LLM Prompt Injection — Direct | PARTIAL | `manager.go:detectPromptInjection()` — 22 active patterns + `collapseSpacingVariant()` | IOC pattern AML.T0051.000 is dead; active patterns cover most common variants but miss base64-encoded payloads and token-split attacks |
-| AML.T0051.001 | LLM Prompt Injection — Indirect | NOT COVERED | IOC pattern exists but is dead; pattern `INSERT.*INJECTION` is too narrow even if live | Real indirect injection via tool results/fetched content is not semantically inspected before reaching the model |
+| AML.T0051.001 | LLM Prompt Injection — Indirect | COVERED | M008: `scanToolResultForInjection()` (`mcp_proxy.go`) runs the full detection suite over `tools/call` result `content[].text` before forwarding, fail-closed block on critical; judge layer (M009) adds semantic coverage | Standalone IOC pattern `INSERT.*INJECTION` stays narrow, but real coverage is the response-path scan. Probes `TestToolResultInjectionBlocked`/`TestToolResultCleanAllowed` (`415b9f4`). SCOPE.md / ISA.md are system of record |
 | AML.T0051.002 | LLM Prompt Injection — Triggered | NOT COVERED | IOC pattern exists but is dead | No live detection of conditional/triggered injection |
 | AML.T0053 | AI Agent Tool Invocation Abuse | PARTIAL | `mcp_proxy.go:validateResourceURI()` blocks explicit bad schemes; `manager.go:function_call_injection` partially active | `validateResourceURI()` not called on tool argument URL values; SSRF.001-004 IOC patterns are dead; no tool arg inspection |
 | AML.T0061 | Prompt Self-Replication | NOT COVERED | IOC pattern AML.T0061.001 defined but dead | — |
@@ -231,8 +231,9 @@ These gaps are in scope, significant, but require new capability rather than jus
 **Fix:** (a) Rate limiting keyed on authenticated user identity, not just IP. (b) Track repetitive uniform query patterns across sessions with sliding window counter. (c) Flag when anomaly score is consistently elevated across a session (not just per-message).
 **Impact:** Closes the primary model extraction vector (distributed low-rate queries).
 
-### P2-4: Indirect Prompt Injection (Tool Result Content)
+### P2-4: Indirect Prompt Injection (Tool Result Content) — ✅ RESOLVED (M008 / ISC-22)
 **ATLAS:** AML.T0051.001
+**Status:** RESOLVED — `scanToolResultForInjection()` applies the full detection suite to tool-call results, fail-closed on critical, before forwarding (probes at `415b9f4`).
 **Code:** `mcp_proxy.go` inspects inbound requests but does not semantically analyse content returned by upstream tool calls before it reaches the model. Current IOC pattern for T0051.001 (`INSERT.*INJECTION`) only matches if attacker labels their payload.
 **Fix:** Apply the full prompt injection detection suite to tool call results flowing back from upstream, treating external content as untrusted data. Requires a response-path sanitization pass before forwarding tool results.
 **Impact:** Closes indirect injection via documents, fetched URLs, database responses fed into the model context.
@@ -304,8 +305,9 @@ cross-session model extraction detection (P2-3) and DNS rebinding SSRF (BUG-2) r
 
 **Status (2026-06-23):** Pure extraction patterns, leet-speak normalisation, and base64
 decode-then-scan shipped. Response compliance scan coverage active. **Open:** Tool-result
-scanning (item 1 — indirect injection via upstream content, ISC-22) is not yet wired; this
-is the primary remaining P2 gap. AML.T0051.001 (indirect prompt injection) remains OPEN.
+scanning (item 1 — indirect injection via upstream content, ISC-22) shipped in M008 via
+`scanToolResultForInjection()`, closing the primary P2 gap. AML.T0051.001 (indirect prompt
+injection) is now COVERED — see SCOPE.md / ISA.md.
 
 ---
 

@@ -18,12 +18,26 @@ git log --oneline -1          # note committed HEAD
 go build ./... && go test ./...
 ```
 
-- An ISC/task is "done" only when `go build ./<pkg>/` and `go test ./<pkg>/` exit 0 against
-  **committed** code with a real probe test. "Files created" is NOT done.
+- An ISC/task is "done" only when the **whole-repo** gate — `go build ./... && go test ./...`
+  run from the repository root — exits 0 against **committed** code with a real probe test.
+  "Files created" is NOT done. Per-package `go build ./<pkg>/` / `go test ./<pkg>/` is a floor
+  you may check while iterating, NOT a substitute for the root gate: new code that compiles in
+  isolation is exactly the code most likely to break the package that wires it in, so the
+  whole-repo run is the one that counts.
+- `go vet`, `gofmt`, `golangci-lint`, or a single-package pass is NOT the build passing. `vet`
+  routinely passes on code that does not compile as a whole program. The moment you are about
+  to report a proxy check in place of the root gate, that is the signal you have not run it.
+- An environmental blocker is an escalation, not a waiver. If the gate genuinely cannot run —
+  the sandbox blocking the Go build cache is the known case here; re-run outside the sandbox —
+  STOP and report "UNVERIFIED, blocked by X". Never downgrade to a weaker check and present its
+  result as though the gate had passed. Self-certifying around a blocker is how broken code
+  gets called done.
 - Uncommitted code that does not compile is worth zero. Do not build on top of it. If you
   find broken uncommitted work, back it up and reset to the last green commit first.
-- Per-package green gate: every package must pass its own build + test before its work is
-  claimed complete.
+- Present is not wired, and wired is not done: a symbol that exists but nothing calls is dead
+  code, not a shipped feature. Grep the call site and exercise the real entry point (the
+  request handler, the route, the CLI command), not just the unit in isolation, before you
+  claim a criterion done.
 
 ## Local-model code-gen failure fingerprints
 

@@ -140,7 +140,7 @@ type APIKeys struct {
 
 // MFA configuration
 type MFA struct {
-	Required  bool `json:"required"`
+	Required  bool     `json:"required"`
 	Providers []string `json:"providers"`
 }
 
@@ -166,13 +166,13 @@ type AnomalyDetection struct {
 	// profile is selected via the X-Aegir-Profile request header or the
 	// upstream.profile config key. Example profiles: "finance", "assistant".
 	// Each profile may override block_threshold and log_threshold.
-	Profiles       map[string]AnomalyProfile `json:"profiles" mapstructure:"profiles"`
+	Profiles map[string]AnomalyProfile `json:"profiles" mapstructure:"profiles"`
 }
 
 // AnomalyProfile holds per-context threshold overrides for anomaly detection (ISC-20/21).
 type AnomalyProfile struct {
-	BlockThreshold  *float64 `json:"block_threshold"  mapstructure:"block_threshold"`
-	LogThreshold    *float64 `json:"log_threshold"    mapstructure:"log_threshold"`
+	BlockThreshold *float64 `json:"block_threshold"  mapstructure:"block_threshold"`
+	LogThreshold   *float64 `json:"log_threshold"    mapstructure:"log_threshold"`
 	// EntropyThreshold allows per-upstream entropy tuning (ISC-21).
 	EntropyThreshold *float64 `json:"entropy_threshold" mapstructure:"entropy_threshold"`
 }
@@ -189,25 +189,35 @@ type Detection struct {
 
 // Security configuration
 type Security struct {
-	RateLimit         RateLimit         `json:"rate_limit"         mapstructure:"rate_limit"`
-	Sanitization      Sanitization      `json:"sanitization"       mapstructure:"sanitization"`
-	Encryption        Encryption        `json:"encryption"         mapstructure:"encryption"`
-	SecretDetection   SecretDetection   `json:"secret_detection"   mapstructure:"secret_detection"`
-	CommandInjection  CommandInjection  `json:"command_injection"  mapstructure:"command_injection"`
-	AnomalyDetection  AnomalyDetection  `json:"anomaly_detection"  mapstructure:"anomaly_detection"`
-	Detection         Detection         `json:"detection"          mapstructure:"detection"`
+	RateLimit        RateLimit           `json:"rate_limit"         mapstructure:"rate_limit"`
+	Sanitization     Sanitization        `json:"sanitization"       mapstructure:"sanitization"`
+	Encryption       Encryption          `json:"encryption"         mapstructure:"encryption"`
+	SecretDetection  SecretDetection     `json:"secret_detection"   mapstructure:"secret_detection"`
+	CommandInjection CommandInjection    `json:"command_injection"  mapstructure:"command_injection"`
+	AnomalyDetection AnomalyDetection    `json:"anomaly_detection"  mapstructure:"anomaly_detection"`
+	Detection        Detection           `json:"detection"          mapstructure:"detection"`
 	HumanApproval    HumanApprovalConfig `json:"human_approval"   mapstructure:"human_approval"`
 	// AllowedOrigins is the list of browser origins permitted to call HTTP MCP
 	// endpoints. Requests bearing an Origin header not in this list are blocked
 	// with 403. Requests without an Origin header (non-browser clients) pass
 	// unconditionally. Empty list means all origins are allowed. (ISC-120)
-	AllowedOrigins   []string            `json:"allowed_origins"  mapstructure:"allowed_origins"`
+	AllowedOrigins []string `json:"allowed_origins"  mapstructure:"allowed_origins"`
 	// ReconRateLimit tracks per-session tools/list call frequency and fires a
 	// tools_list_recon_suspected log event when the threshold is exceeded. (ISC-121)
-	ReconRateLimit   ReconRateLimitConfig `json:"recon_rate_limit" mapstructure:"recon_rate_limit"`
+	ReconRateLimit ReconRateLimitConfig `json:"recon_rate_limit" mapstructure:"recon_rate_limit"`
 	// OAuthScopeAudit parses JWT bearer tokens on incoming requests and fires
 	// excessive_scope_detected when any prohibited scope is present. (ISC-122)
-	OAuthScopeAudit  OAuthScopeAuditConfig `json:"oauth_scope_audit" mapstructure:"oauth_scope_audit"`
+	OAuthScopeAudit OAuthScopeAuditConfig `json:"oauth_scope_audit" mapstructure:"oauth_scope_audit"`
+	// AsyncTaskQuota caps the number of concurrent async/long-running tasks per
+	// authenticated identity (ISC-171/172). Disabled by default; only bites once an
+	// async task lifecycle registers tasks in the registry. (MCP 2026-07-28)
+	AsyncTaskQuota AsyncTaskQuotaConfig `json:"async_task_quota" mapstructure:"async_task_quota"`
+}
+
+// AsyncTaskQuotaConfig configures per-identity async task concurrency limits (ISC-171/172).
+type AsyncTaskQuotaConfig struct {
+	Enabled        bool `json:"enabled"         mapstructure:"enabled"`
+	MaxConcurrency int  `json:"max_concurrency" mapstructure:"max_concurrency"`
 }
 
 // OAuthScopeAuditConfig configures JWT scope auditing and enforcement (ISC-122).
@@ -219,8 +229,8 @@ type OAuthScopeAuditConfig struct {
 
 // ReconRateLimitConfig configures per-session tools/list frequency detection (ISC-121).
 type ReconRateLimitConfig struct {
-	Enabled             bool `json:"enabled"               mapstructure:"enabled"`
-	ToolsListMaxPerMin  int  `json:"tools_list_max_per_min" mapstructure:"tools_list_max_per_min"`
+	Enabled            bool `json:"enabled"               mapstructure:"enabled"`
+	ToolsListMaxPerMin int  `json:"tools_list_max_per_min" mapstructure:"tools_list_max_per_min"`
 }
 
 // HumanApprovalConfig gates destructive tool calls behind an external webhook
@@ -236,35 +246,35 @@ type HumanApprovalConfig struct {
 
 // RateLimit configuration
 type RateLimit struct {
-	Enabled         bool     `json:"enabled"          mapstructure:"enabled"`
-	RequestsPerMin  int      `json:"requests_per_min" mapstructure:"requests_per_min"`
-	BurstSize       int      `json:"burst_size"       mapstructure:"burst_size"`
-	CleanupInterval int      `json:"cleanup_interval" mapstructure:"cleanup_interval"`
-	MaxTrackedIPs   int      `json:"max_tracked_ips"  mapstructure:"max_tracked_ips"`
+	Enabled         bool `json:"enabled"          mapstructure:"enabled"`
+	RequestsPerMin  int  `json:"requests_per_min" mapstructure:"requests_per_min"`
+	BurstSize       int  `json:"burst_size"       mapstructure:"burst_size"`
+	CleanupInterval int  `json:"cleanup_interval" mapstructure:"cleanup_interval"`
+	MaxTrackedIPs   int  `json:"max_tracked_ips"  mapstructure:"max_tracked_ips"`
 	// TrustedProxies lists proxy IPs whose X-Forwarded-For/X-Real-IP headers are
 	// honoured for client-IP extraction. When empty, those headers are ignored and
 	// the rate limiter keys on the direct RemoteAddr — preventing header spoofing
 	// from bypassing the limiter (AEGIR-M-002).
-	TrustedProxies  []string `json:"trusted_proxies"  mapstructure:"trusted_proxies"`
+	TrustedProxies []string `json:"trusted_proxies"  mapstructure:"trusted_proxies"`
 }
 
 // Sanitization configuration
 type Sanitization struct {
-	Enabled           bool `json:"enabled"            mapstructure:"enabled"`
-	XSSPrevention     bool `json:"xss_prevention"     mapstructure:"xss_prevention"`
-	SQLInjection      bool `json:"sql_injection"      mapstructure:"sql_injection"`
-	HomoglyphFilter   bool `json:"homoglyph_filter"   mapstructure:"homoglyph_filter"`
-	FormulaDetection  bool `json:"formula_detection"  mapstructure:"formula_detection"`
-	PromptInjection   bool `json:"prompt_injection"   mapstructure:"prompt_injection"`
+	Enabled          bool `json:"enabled"            mapstructure:"enabled"`
+	XSSPrevention    bool `json:"xss_prevention"     mapstructure:"xss_prevention"`
+	SQLInjection     bool `json:"sql_injection"      mapstructure:"sql_injection"`
+	HomoglyphFilter  bool `json:"homoglyph_filter"   mapstructure:"homoglyph_filter"`
+	FormulaDetection bool `json:"formula_detection"  mapstructure:"formula_detection"`
+	PromptInjection  bool `json:"prompt_injection"   mapstructure:"prompt_injection"`
 }
 
 // Encryption configuration
 type Encryption struct {
-	Algorithm    string `json:"algorithm"   mapstructure:"algorithm"`
-	KeySize      int    `json:"key_size"    mapstructure:"key_size"`
-	KeyRotation  int    `json:"key_rotation_days" mapstructure:"key_rotation_days"`
-	HardwareHSM  bool   `json:"hardware_hsm" mapstructure:"hardware_hsm"`
-	CloudKMS     string `json:"cloud_kms"   mapstructure:"cloud_kms"`
+	Algorithm   string `json:"algorithm"   mapstructure:"algorithm"`
+	KeySize     int    `json:"key_size"    mapstructure:"key_size"`
+	KeyRotation int    `json:"key_rotation_days" mapstructure:"key_rotation_days"`
+	HardwareHSM bool   `json:"hardware_hsm" mapstructure:"hardware_hsm"`
+	CloudKMS    string `json:"cloud_kms"   mapstructure:"cloud_kms"`
 }
 
 // SecretDetection configuration
@@ -287,10 +297,10 @@ type CommandInjection struct {
 
 // Compliance configuration
 type Compliance struct {
-	HIPAA          HIPAAConfig       `json:"hipaa"            mapstructure:"hipaa"`
-	PCI            PCIConfig         `json:"pci"              mapstructure:"pci"`
-	GDPR           GDPRConfig        `json:"gdpr"             mapstructure:"gdpr"`
-	SOC2           SOC2Config        `json:"soc2"             mapstructure:"soc2"`
+	HIPAA HIPAAConfig `json:"hipaa"            mapstructure:"hipaa"`
+	PCI   PCIConfig   `json:"pci"              mapstructure:"pci"`
+	GDPR  GDPRConfig  `json:"gdpr"             mapstructure:"gdpr"`
+	SOC2  SOC2Config  `json:"soc2"             mapstructure:"soc2"`
 	// ResponsePolicy maps violation type (e.g. "pii", "phi", "pci") to the action
 	// taken when that data type is found in a response: "block", "redact", or
 	// "log-only". Absent types fall back to "redact". Configured via
@@ -332,54 +342,54 @@ type SOC2Config struct {
 
 // SessionAnalysis configuration for conversational threat detection
 type SessionAnalysis struct {
-	Enabled              bool          `json:"enabled" mapstructure:"enabled"`
-	MaxSessionAge        time.Duration `json:"max_session_age" mapstructure:"max_session_age"`
-	MaxHistorySize       int           `json:"max_history_size" mapstructure:"max_history_size"`
-	ThreatThreshold      float64       `json:"threat_threshold" mapstructure:"threat_threshold"`
-	CleanupInterval      time.Duration `json:"cleanup_interval" mapstructure:"cleanup_interval"`
-	JailbreakThreshold   float64       `json:"jailbreak_threshold" mapstructure:"jailbreak_threshold"`
-	RoleEscalationLimit  int           `json:"role_escalation_limit" mapstructure:"role_escalation_limit"`
-	EmotionalManipThreshold float64    `json:"emotional_manip_threshold" mapstructure:"emotional_manip_threshold"`
+	Enabled                 bool          `json:"enabled" mapstructure:"enabled"`
+	MaxSessionAge           time.Duration `json:"max_session_age" mapstructure:"max_session_age"`
+	MaxHistorySize          int           `json:"max_history_size" mapstructure:"max_history_size"`
+	ThreatThreshold         float64       `json:"threat_threshold" mapstructure:"threat_threshold"`
+	CleanupInterval         time.Duration `json:"cleanup_interval" mapstructure:"cleanup_interval"`
+	JailbreakThreshold      float64       `json:"jailbreak_threshold" mapstructure:"jailbreak_threshold"`
+	RoleEscalationLimit     int           `json:"role_escalation_limit" mapstructure:"role_escalation_limit"`
+	EmotionalManipThreshold float64       `json:"emotional_manip_threshold" mapstructure:"emotional_manip_threshold"`
 }
 
 // Upstream configuration for MCP service discovery and proxying
 type Upstream struct {
-	Services         []UpstreamService `json:"services"`
-	Discovery        Discovery         `json:"discovery"`
-	LoadBalancing    LoadBalancing     `json:"load_balancing"`
-	HealthCheck      HealthCheck       `json:"health_check"`
-	CircuitBreaker   CircuitBreaker    `json:"circuit_breaker"`
-	Retry            RetryConfig       `json:"retry"`
+	Services       []UpstreamService `json:"services"`
+	Discovery      Discovery         `json:"discovery"`
+	LoadBalancing  LoadBalancing     `json:"load_balancing"`
+	HealthCheck    HealthCheck       `json:"health_check"`
+	CircuitBreaker CircuitBreaker    `json:"circuit_breaker"`
+	Retry          RetryConfig       `json:"retry"`
 }
 
 // UpstreamService represents a backend MCP service
 type UpstreamService struct {
-	Name        string            `json:"name"`
-	URL         string            `json:"url"`
-	Transport   string            `json:"transport"` // http, stdio, sse
-	Weight      int               `json:"weight"`
-	Priority    int               `json:"priority"`
-	Tags        []string          `json:"tags"`
-	Metadata    map[string]string `json:"metadata"`
-	Enabled     bool              `json:"enabled"`
-	TLS         UpstreamTLS       `json:"tls"`
-	Timeout     int               `json:"timeout_seconds"`
+	Name      string            `json:"name"`
+	URL       string            `json:"url"`
+	Transport string            `json:"transport"` // http, stdio, sse
+	Weight    int               `json:"weight"`
+	Priority  int               `json:"priority"`
+	Tags      []string          `json:"tags"`
+	Metadata  map[string]string `json:"metadata"`
+	Enabled   bool              `json:"enabled"`
+	TLS       UpstreamTLS       `json:"tls"`
+	Timeout   int               `json:"timeout_seconds"`
 }
 
 // UpstreamTLS configuration for upstream connections
 type UpstreamTLS struct {
-	Enabled            bool   `json:"enabled"`
-	SkipVerify         bool   `json:"skip_verify"`
-	ClientCertFile     string `json:"client_cert_file"`
-	ClientKeyFile      string `json:"client_key_file"`
-	CACertFile         string `json:"ca_cert_file"`
-	ServerName         string `json:"server_name"`
+	Enabled        bool   `json:"enabled"`
+	SkipVerify     bool   `json:"skip_verify"`
+	ClientCertFile string `json:"client_cert_file"`
+	ClientKeyFile  string `json:"client_key_file"`
+	CACertFile     string `json:"ca_cert_file"`
+	ServerName     string `json:"server_name"`
 }
 
 // Discovery configuration for service discovery
 type Discovery struct {
 	Enabled   bool   `json:"enabled"`
-	Provider  string `json:"provider"`  // consul, dns, static, kubernetes
+	Provider  string `json:"provider"` // consul, dns, static, kubernetes
 	Endpoint  string `json:"endpoint"`
 	Namespace string `json:"namespace"`
 	Interval  int    `json:"interval_seconds"`
@@ -387,36 +397,36 @@ type Discovery struct {
 
 // LoadBalancing configuration
 type LoadBalancing struct {
-	Strategy    string `json:"strategy"`     // round_robin, weighted, least_connections, random
-	StickyKey   string `json:"sticky_key"`  // header or cookie name for sticky sessions
-	HashKey     string `json:"hash_key"`    // for consistent hashing
+	Strategy  string `json:"strategy"`   // round_robin, weighted, least_connections, random
+	StickyKey string `json:"sticky_key"` // header or cookie name for sticky sessions
+	HashKey   string `json:"hash_key"`   // for consistent hashing
 }
 
 // HealthCheck configuration
 type HealthCheck struct {
-	Enabled         bool   `json:"enabled"`
-	Interval        int    `json:"interval_seconds"`
-	Timeout         int    `json:"timeout_seconds"`
+	Enabled            bool   `json:"enabled"`
+	Interval           int    `json:"interval_seconds"`
+	Timeout            int    `json:"timeout_seconds"`
 	HealthyThreshold   int    `json:"healthy_threshold"`
 	UnhealthyThreshold int    `json:"unhealthy_threshold"`
-	Path            string `json:"path"`
-	ExpectedCodes   []int  `json:"expected_codes"`
+	Path               string `json:"path"`
+	ExpectedCodes      []int  `json:"expected_codes"`
 }
 
 // CircuitBreaker configuration
 type CircuitBreaker struct {
-	Enabled           bool  `json:"enabled"`
-	FailureThreshold  int   `json:"failure_threshold"`
-	RecoveryTimeout   int   `json:"recovery_timeout_seconds"`
-	HalfOpenRequests  int   `json:"half_open_requests"`
+	Enabled          bool `json:"enabled"`
+	FailureThreshold int  `json:"failure_threshold"`
+	RecoveryTimeout  int  `json:"recovery_timeout_seconds"`
+	HalfOpenRequests int  `json:"half_open_requests"`
 }
 
 // RetryConfig for upstream request retries
 type RetryConfig struct {
-	Enabled     bool  `json:"enabled"`
-	MaxRetries  int   `json:"max_retries"`
-	BackoffMs   int   `json:"backoff_ms"`
-	MaxBackoffMs int   `json:"max_backoff_ms"`
+	Enabled      bool `json:"enabled"`
+	MaxRetries   int  `json:"max_retries"`
+	BackoffMs    int  `json:"backoff_ms"`
+	MaxBackoffMs int  `json:"max_backoff_ms"`
 }
 
 // Load loads configuration from multiple sources with precedence:
@@ -750,6 +760,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("security.oauth_scope_audit.enabled", true)
 	v.SetDefault("security.oauth_scope_audit.prohibited_scopes", []string{"*", "admin", "write:all"})
 
+	// Async task quota defaults (ISC-171/172): disabled by default; 5 concurrent per identity when on.
+	v.SetDefault("security.async_task_quota.enabled", false)
+	v.SetDefault("security.async_task_quota.max_concurrency", 5)
+
 	// Human approval gate defaults (ISC-119): disabled by default; common destructive prefixes.
 	v.SetDefault("security.human_approval.enabled", false)
 	v.SetDefault("security.human_approval.patterns", []string{"delete_", "drop_", "purge_", "format_", "overwrite_"})
@@ -937,10 +951,10 @@ func LoadLegacy() (*Config, error) {
 		},
 		Compliance: Compliance{
 			HIPAA: HIPAAConfig{
-				Enabled:     getEnvAsBool("HIPAA_ENABLED", false),
+				Enabled:      getEnvAsBool("HIPAA_ENABLED", false),
 				PHIDetection: getEnvAsBool("PHI_DETECTION", false),
-				Encryption:  getEnvAsBool("HIPAA_ENCRYPTION", false),
-				AuditTrail:  getEnvAsBool("HIPAA_AUDIT", false),
+				Encryption:   getEnvAsBool("HIPAA_ENCRYPTION", false),
+				AuditTrail:   getEnvAsBool("HIPAA_AUDIT", false),
 			},
 			PCI: PCIConfig{
 				Enabled:        getEnvAsBool("PCI_ENABLED", false),
@@ -949,12 +963,12 @@ func LoadLegacy() (*Config, error) {
 				EncryptStorage: getEnvAsBool("PCI_ENCRYPT_STORAGE", false),
 			},
 			GDPR: GDPRConfig{
-				Enabled:        getEnvAsBool("GDPR_ENABLED", false),
-				PIIDetection:   getEnvAsBool("PII_DETECTION", false),
-				RightToErasure: getEnvAsBool("RIGHT_TO_ERASURE", false),
+				Enabled:         getEnvAsBool("GDPR_ENABLED", false),
+				PIIDetection:    getEnvAsBool("PII_DETECTION", false),
+				RightToErasure:  getEnvAsBool("RIGHT_TO_ERASURE", false),
 				DataPortability: getEnvAsBool("DATA_PORTABILITY", false),
 				ConsentTracking: getEnvAsBool("CONSENT_TRACKING", false),
-				Region:         getEnv("GDPR_REGION", "EU"),
+				Region:          getEnv("GDPR_REGION", "EU"),
 			},
 			SOC2: SOC2Config{
 				Enabled: getEnvAsBool("SOC2_ENABLED", false),

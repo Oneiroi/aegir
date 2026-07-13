@@ -3,7 +3,8 @@
 **Version:** 1.2  
 **Generated:** 2026-07-02  
 **Machine-readable companion:** `aegir-scope.json`  
-**Satisfies:** ISC-13, ISC-101, ISC-113
+**Satisfies:** ISC-13, ISC-101, ISC-113  
+**Proposed improvements / branch points:** `RECOMMENDATIONS.md` — reviewed-but-not-yet-adopted scope additions (e.g. an explicit RFC 8707 token-handling posture and an authorization-boundary statement), kept separate so the current scope stays a statement of what *is*, not what *may become*.
 
 ---
 

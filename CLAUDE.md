@@ -30,15 +30,18 @@ Key routing rules:
 - Save progress → invoke /context-save
 - Resume context → invoke /context-restore
 
-## Gemma Model Tiering (via OMLX)
+## Model Tiering (via OMLX)
 
 To optimize for cognitive complexity and memory profile, steer based on the following mapping:
 
 | Task Type | Recommended Tier | Local Model | Memory Profile |
 | :--- | :--- | :--- | :--- |
-| Security Audit / Threat Model | **Opus** | `gemma-4-31B-it-8bit` | $\approx 45\text{GB}$ |
-| Feature Implementation | **Sonnet** | `gemma-4-26B-A4B-it-8bit` | $\approx 30\text{GB}$ |
-| Boilerplate / Docs / Logs | **Haiku** | `gemma-4-12B-it-8bit` | $\approx 15\text{GB}$ |
+| Security Audit / Threat Model | **Opus** | `Qwen3-Coder-Next-MLX-8bit` | $\approx 45\text{GB}$ |
+| Feature Implementation | **Sonnet** | `Qwen3.6-35B-A3B-MLX-8bit` | $\approx 30\text{GB}$ |
+| Boilerplate / Docs / Logs | **Haiku** | `Ornith-1.0-9B-8bit` | $\approx 15\text{GB}$ |
 
 **Mimir's Take:** Don't let the ISA.md dictate the model choice if the task feels trivial. If you're just moving a function from one file to another, don't wake up the 31B—it's like using a sledgehammer to crack a nut. Use the 12B for the grunt work and save the 31B for when we're actually trying to break something.
 
+## learning law
+after every non-trivial solved problem, run the extract-approach skill before moving on
+a solution without its learnings note is unfinished work

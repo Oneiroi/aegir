@@ -26,9 +26,9 @@ type jsonRPCError struct {
 
 // jsonRPCErrorResponse is a well-formed JSON-RPC 2.0 error response.
 type jsonRPCErrorResponse struct {
-	Jsonrpc string        `json:"jsonrpc"`
-	ID      interface{}   `json:"id"`
-	Error   jsonRPCError  `json:"error"`
+	Jsonrpc string       `json:"jsonrpc"`
+	ID      interface{}  `json:"id"`
+	Error   jsonRPCError `json:"error"`
 }
 
 // buildErrorResponse constructs a well-formed JSON-RPC 2.0 error response.
@@ -80,6 +80,59 @@ func Validate(rawMsg []byte) (ok bool, errResponse []byte) {
 	}
 	if len(unknown) > 0 {
 		return false, buildErrorResponse(id, -32600, fmt.Sprintf("unknown top-level fields: %v", unknown))
+	}
+
+	return true, nil
+}
+
+// ValidateWithHeaders checks rawMsg against JSON-RPC 2.0 schema and
+// validates consistency between HTTP headers and the JSON-RPC body.
+// ISC-166: when Mcp-Method and/or Mcp-Name HTTP headers are present, the gateway
+// asserts they equal the JSON-RPC body method and tool name; any mismatch is rejected.
+// Returns ok=true when the message is structurally valid and headers match, or ok=false
+// with a JSON-RPC error response in errResponse.
+func ValidateWithHeaders(rawMsg []byte, methodHeader, nameHeader string) (ok bool, errResponse []byte) {
+	// First validate the JSON-RPC structure
+	ok, errResponse = Validate(rawMsg)
+	if !ok {
+		return false, errResponse
+	}
+
+	// Parse the message to extract method and params (if any)
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(rawMsg, &doc); err != nil {
+		return false, buildErrorResponse(nil, -32700, fmt.Sprintf("parse error: %v", err))
+	}
+
+	// Extract method from body
+	var methodFromBody string
+	if rawMethod, exists := doc["method"]; exists {
+		if err := json.Unmarshal(rawMethod, &methodFromBody); err != nil {
+			return false, buildErrorResponse(nil, -32600, `"method" must be a string`)
+		}
+	}
+
+	// Check Mcp-Method header matches body method
+	if methodHeader != "" && methodHeader != methodFromBody {
+		return false, buildErrorResponse(nil, -32600, fmt.Sprintf("Mcp-Method header (%s) does not match body method (%s)", methodHeader, methodFromBody))
+	}
+
+	// Extract tool name from params (tools/call has "name" field)
+	var toolName string
+	if rawParams, exists := doc["params"]; exists {
+		var paramsMap map[string]json.RawMessage
+		if err := json.Unmarshal(rawParams, &paramsMap); err == nil {
+			if rawName, ok := paramsMap["name"]; ok {
+				if err := json.Unmarshal(rawName, &toolName); err != nil {
+					return false, buildErrorResponse(nil, -32600, `"params.name" must be a string`)
+				}
+			}
+		}
+	}
+
+	// Check Mcp-Name header matches tool name (for tools/call)
+	if nameHeader != "" && nameHeader != toolName {
+		return false, buildErrorResponse(nil, -32600, fmt.Sprintf("Mcp-Name header (%s) does not match tool name (%s)", nameHeader, toolName))
 	}
 
 	return true, nil

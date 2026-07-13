@@ -20,8 +20,11 @@ import (
 	"github.com/aegishjalmur/aegir/internal/dashboard"
 	"github.com/aegishjalmur/aegir/internal/judge"
 	"github.com/aegishjalmur/aegir/internal/logging"
+	"github.com/aegishjalmur/aegir/internal/meta"
+	"github.com/aegishjalmur/aegir/internal/protocolguard"
 	"github.com/aegishjalmur/aegir/internal/sanitizer"
 	"github.com/aegishjalmur/aegir/internal/session"
+	"github.com/aegishjalmur/aegir/internal/tasks"
 	"github.com/aegishjalmur/aegir/internal/upstream"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -38,12 +41,14 @@ type MCPProxy struct {
 	anomalyDetector   anomaly.Detector
 	ruleEngine        *judge.RuleEngine
 	upgrader          websocket.Upgrader
+	metaInspector     *meta.Inspector
+	taskRegistry      *tasks.Registry
 	anomalyCount      atomic.Uint64
 	anomalyScoreSum   atomic.Uint64 // stored as score*1e6 to avoid float atomics
 
 	// Recon rate limit (ISC-121): per-session tools/list call timestamps.
-	reconMu     sync.Mutex
-	reconCalls  map[string][]time.Time // key: session ID → slice of call timestamps
+	reconMu    sync.Mutex
+	reconCalls map[string][]time.Time // key: session ID → slice of call timestamps
 }
 
 // AnomalyStats holds aggregate anomaly scoring data for metrics.
@@ -118,8 +123,25 @@ func NewMCPProxy(cfg *config.Config, logger *logging.Logger, sanitizerMgr *sanit
 				return false
 			},
 		},
-		reconCalls: make(map[string][]time.Time),
+		reconCalls:    make(map[string][]time.Time),
+		metaInspector: meta.NewInspector(nil, false), // Default: strip unknown keys
+		taskRegistry:  newTaskRegistry(cfg),
 	}
+}
+
+// newTaskRegistry builds the async-task registry (ISC-171/172). tools/call is always
+// tracked for disconnect-cancellation, but the concurrency/total caps only bite when
+// AsyncTaskQuota is enabled — otherwise they're set effectively unlimited so a disabled
+// feature can never reject a request, matching the documented "dormant by default" posture.
+func newTaskRegistry(cfg *config.Config) *tasks.Registry {
+	taskCfg := tasks.DefaultConfig()
+	if cfg.Security.AsyncTaskQuota.Enabled && cfg.Security.AsyncTaskQuota.MaxConcurrency > 0 {
+		taskCfg.MaxConcurrency = cfg.Security.AsyncTaskQuota.MaxConcurrency
+	} else {
+		taskCfg.MaxConcurrency = math.MaxInt32
+	}
+	taskCfg.MaxTotal = math.MaxInt32
+	return tasks.NewRegistry(taskCfg)
 }
 
 // HandleMCPRequest processes incoming MCP requests with security filtering
@@ -138,8 +160,93 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 		return
 	}
 
+	// V3: Header/body desync guard (ISC-166)
+	// Extract headers and validate against JSON-RPC body
+	methodHeader := c.GetHeader("Mcp-Method")
+	nameHeader := c.GetHeader("Mcp-Name")
+
+	// Reconstruct a well-formed JSON-RPC body from the already-parsed request so
+	// the header/body comparison runs against valid JSON regardless of the id
+	// type. fmt string-building emits invalid JSON for string or null ids and
+	// would false-block legitimate requests.
+	bodyMap := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  req.Method,
+		"id":      req.ID,
+	}
+	if req.Params != nil {
+		bodyMap["params"] = req.Params
+	}
+	bodyJSON, _ := json.Marshal(bodyMap)
+
+	if ok, _ := protocolguard.ValidateWithHeaders(bodyJSON, methodHeader, nameHeader); !ok {
+		p.logger.Warn("MCP request blocked by header/body desync check",
+			"user_id", p.getUserID(c),
+			"method_header", methodHeader,
+			"name_header", nameHeader,
+			"method_body", req.Method,
+			"response_path", "block-with-400")
+		c.JSON(http.StatusBadRequest, MCPResponse{
+			Error: &MCPError{
+				Code:    -32600,
+				Message: "Request blocked by header/body mismatch",
+				Data:    "Mcp-Method/Mcp-Name headers do not match JSON-RPC body",
+			},
+			ID: req.ID,
+		})
+		return
+	}
+
+	// V6: Async task quota check (ISC-171/172)
+	userID := p.getUserID(c)
+
+	// Check if we're within quota before spawning async tasks. Dormant until an
+	// async task lifecycle registers tasks in taskRegistry; Enabled defaults false.
+	if p.config.Security.AsyncTaskQuota.Enabled {
+		taskCount := p.taskRegistry.GetTaskCount(userID)
+		maxConcurrency := p.config.Security.AsyncTaskQuota.MaxConcurrency
+		if maxConcurrency > 0 && taskCount >= maxConcurrency {
+			p.logger.Warn("MCP request blocked by async task quota",
+				"user_id", userID,
+				"current_tasks", taskCount,
+				"max_concurrency", maxConcurrency,
+				"response_path", "block-with-429")
+			c.JSON(http.StatusTooManyRequests, MCPResponse{
+				Error: &MCPError{
+					Code:    -32000,
+					Message: "Request blocked by async task quota",
+					Data:    fmt.Sprintf("Too many concurrent tasks: %d/%d", taskCount, maxConcurrency),
+				},
+				ID: req.ID,
+			})
+			return
+		}
+	}
+
 	// Log the incoming request
 	p.logMCPRequest(c, &req)
+
+	// V2: Meta inspector - validate and sanitize params._meta (ISC-167/168)
+	paramsJSON, _ := json.Marshal(req.Params)
+	if sanitizedParamsJSON, allowed := p.metaInspector.Inspect(paramsJSON); !allowed {
+		p.logger.Warn("MCP request blocked by meta inspector (unknown keys)",
+			"user_id", p.getUserID(c),
+			"response_path", "block-with-403")
+		c.JSON(http.StatusForbidden, MCPResponse{
+			Error: &MCPError{
+				Code:    -32000,
+				Message: "Request blocked by meta inspection",
+			},
+			ID: req.ID,
+		})
+		return
+	} else if sanitizedParamsJSON != nil {
+		// Update req.Params with sanitized version
+		var sanitizedParams map[string]interface{}
+		if err := json.Unmarshal(sanitizedParamsJSON, &sanitizedParams); err == nil {
+			req.Params = sanitizedParams
+		}
+	}
 
 	// Session analysis (if enabled) - BEFORE sanitization
 	if p.sessionAnalyzer != nil {
@@ -394,7 +501,37 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 		ID:     req.ID,
 	}
 
-	upstreamResp, err := p.upstreamManager.ForwardRequest(c.Request.Context(), upstreamReq)
+	// V6: Register tools/call as a tracked async task (ISC-171/172). tools/call is
+	// the only method that spawns real upstream work long enough to matter for quota
+	// or cancellation; other methods (initialize, resources/list, ...) are fast
+	// metadata calls and stay untracked. The task-scoped context is derived from
+	// c.Request.Context(), so a client disconnect cancels the in-flight upstream call
+	// exactly as it would without the registry — the registry adds the quota
+	// accounting the earlier pre-check depends on.
+	forwardCtx := c.Request.Context()
+	var asyncTaskID string
+	if req.Method == "tools/call" {
+		asyncTaskID = fmt.Sprintf("%s-%d", userID, time.Now().UnixNano())
+		taskCtx, ok := p.taskRegistry.StartTaskWithUserContext(asyncTaskID, userID, "", c.Request.Context())
+		if !ok {
+			p.logger.Warn("MCP request blocked by async task quota",
+				"user_id", userID,
+				"response_path", "block-with-429")
+			c.JSON(http.StatusTooManyRequests, MCPResponse{
+				Error: &MCPError{
+					Code:    -32000,
+					Message: "Request blocked by async task quota",
+				},
+				ID: req.ID,
+			})
+			return
+		}
+		p.taskRegistry.MarkRunning(asyncTaskID)
+		forwardCtx = taskCtx
+		defer p.taskRegistry.MarkFinished(asyncTaskID)
+	}
+
+	upstreamResp, err := p.upstreamManager.ForwardRequest(forwardCtx, upstreamReq)
 	if err != nil {
 		p.logger.Error("Failed to forward request to upstream", "error", err)
 		// Fall back to local handling — firewall exposes built-in security tools
@@ -463,7 +600,7 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 		response.Result = decision.result
 		c.JSON(http.StatusOK, response)
 		return
-	// "allow" (no violations, or log-only): fall through to the sanitizer pass.
+		// "allow" (no violations, or log-only): fall through to the sanitizer pass.
 	}
 
 	// Default path (no violations, or log-only): apply the sanitizer for
@@ -907,11 +1044,11 @@ func (p *MCPProxy) handleToolsCall(_ context.Context, req *MCPRequest) *MCPRespo
 				p.logger.Warn("Human approval gate: blocked destructive tool call",
 					"tool", toolName, "reason", err.Error())
 				p.logger.LogSecurityEvent(&logging.SecurityEvent{
-					Type:     "human_approval_timeout",
-					Severity: "high",
-					Message:  "Destructive tool call blocked: human approval not received",
+					Type:      "human_approval_timeout",
+					Severity:  "high",
+					Message:   "Destructive tool call blocked: human approval not received",
 					Timestamp: time.Now(),
-					Details:  map[string]string{"tool": toolName, "reason": err.Error()},
+					Details:   map[string]string{"tool": toolName, "reason": err.Error()},
 				})
 				return &MCPResponse{
 					Error: &MCPError{
@@ -992,9 +1129,9 @@ func (p *MCPProxy) trackReconCall(c *gin.Context, req *MCPRequest) {
 			ClientIP:  c.ClientIP(),
 			Timestamp: time.Now(),
 			Details: map[string]string{
-				"session_id": sessionID,
+				"session_id":    sessionID,
 				"calls_per_min": strconv.Itoa(count),
-				"threshold": strconv.Itoa(threshold),
+				"threshold":     strconv.Itoa(threshold),
 			},
 		})
 	}

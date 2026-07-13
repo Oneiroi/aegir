@@ -180,3 +180,96 @@ func validateErrorResponse(t *testing.T, errResp []byte) {
 		t.Errorf("error response must have error field")
 	}
 }
+
+// TestHeaderBodyMethodMismatchRejected verifies that ISC-166 rejects
+// requests where Mcp-Method header doesn't match the JSON-RPC body method.
+func TestHeaderBodyMethodMismatchRejected(t *testing.T) {
+	msg := []byte(`{"jsonrpc":"2.0","method":"tools/list","id":1}`)
+
+	// Header method differs from body method
+	ok, errResp := protocolguard.ValidateWithHeaders(msg, "tools/call", "")
+
+	if ok {
+		t.Errorf("Expected validation to fail, but got ok=true")
+	}
+	if len(errResp) == 0 {
+		t.Errorf("Expected error response, but got empty")
+	}
+
+	// Verify error code is -32600
+	var errRespJSON map[string]interface{}
+	if err := json.Unmarshal(errResp, &errRespJSON); err != nil {
+		t.Fatalf("Failed to unmarshal error response: %v", err)
+	}
+	if errRespJSON["error"] != nil {
+		errObj := errRespJSON["error"].(map[string]interface{})
+		// JSON numbers unmarshal into interface{} as float64, so compare against float64.
+		if errObj["code"] != float64(-32600) {
+			t.Errorf("Expected error code -32600, got %v", errObj["code"])
+		}
+	}
+}
+
+// TestHeaderBodyMatchAllowed verifies that ISC-166 allows requests where
+// Mcp-Method header matches the JSON-RPC body method.
+func TestHeaderBodyMatchAllowed(t *testing.T) {
+	msg := []byte(`{"jsonrpc":"2.0","method":"tools/call","id":1}`)
+
+	// Header method matches body method
+	ok, errResp := protocolguard.ValidateWithHeaders(msg, "tools/call", "")
+
+	if !ok {
+		t.Errorf("Expected validation to pass, but got ok=false")
+	}
+	if len(errResp) > 0 {
+		t.Errorf("Expected no error response, but got one")
+	}
+}
+
+// TestHeaderBodyMatchAllowedNoHeader verifies that ISC-166 allows requests
+// when no header is provided (empty string).
+func TestHeaderBodyMatchAllowedNoHeader(t *testing.T) {
+	msg := []byte(`{"jsonrpc":"2.0","method":"tools/call","id":1}`)
+
+	// No header provided - should pass
+	ok, errResp := protocolguard.ValidateWithHeaders(msg, "", "")
+
+	if !ok {
+		t.Errorf("Expected validation to pass, but got ok=false")
+	}
+	if len(errResp) > 0 {
+		t.Errorf("Expected no error response, but got one")
+	}
+}
+
+// TestHeaderBodyNameMismatchRejected verifies that ISC-166 rejects
+// requests where Mcp-Name header doesn't match the tool name in params.
+func TestHeaderBodyNameMismatchRejected(t *testing.T) {
+	msg := []byte(`{"jsonrpc":"2.0","method":"tools/call","params":{"name":"search","query":"test"},"id":1}`)
+
+	// Header name differs from params.name
+	ok, errResp := protocolguard.ValidateWithHeaders(msg, "tools/call", "list")
+
+	if ok {
+		t.Errorf("Expected validation to fail, but got ok=true")
+	}
+	if len(errResp) == 0 {
+		t.Errorf("Expected error response, but got empty")
+	}
+}
+
+// TestHeaderBodyNameMatchAllowed verifies that ISC-166 allows requests where
+// Mcp-Name header matches the tool name in params.
+func TestHeaderBodyNameMatchAllowed(t *testing.T) {
+	msg := []byte(`{"jsonrpc":"2.0","method":"tools/call","params":{"name":"search","query":"test"},"id":1}`)
+
+	// Header name matches params.name
+	ok, errResp := protocolguard.ValidateWithHeaders(msg, "tools/call", "search")
+
+	if !ok {
+		t.Errorf("Expected validation to pass, but got ok=false")
+	}
+	if len(errResp) > 0 {
+		t.Errorf("Expected no error response, but got one")
+	}
+}
