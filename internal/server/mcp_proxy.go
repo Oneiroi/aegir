@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -24,6 +25,7 @@ import (
 	"github.com/aegishjalmur/aegir/internal/protocolguard"
 	"github.com/aegishjalmur/aegir/internal/sanitizer"
 	"github.com/aegishjalmur/aegir/internal/session"
+	"github.com/aegishjalmur/aegir/internal/statesign"
 	"github.com/aegishjalmur/aegir/internal/tasks"
 	"github.com/aegishjalmur/aegir/internal/upstream"
 	"github.com/gin-gonic/gin"
@@ -43,6 +45,8 @@ type MCPProxy struct {
 	upgrader          websocket.Upgrader
 	metaInspector     *meta.Inspector
 	taskRegistry      *tasks.Registry
+	replayCache       *protocolguard.ReplayCache
+	stateSigner       *statesign.Signer
 	anomalyCount      atomic.Uint64
 	anomalyScoreSum   atomic.Uint64 // stored as score*1e6 to avoid float atomics
 
@@ -126,7 +130,24 @@ func NewMCPProxy(cfg *config.Config, logger *logging.Logger, sanitizerMgr *sanit
 		reconCalls:    make(map[string][]time.Time),
 		metaInspector: meta.NewInspector(nil, false), // Default: strip unknown keys
 		taskRegistry:  newTaskRegistry(cfg),
+		replayCache:   protocolguard.NewReplayCache(time.Duration(cfg.Security.ReplayProtection.TTLSeconds) * time.Second),
+		stateSigner:   newStateSigner(cfg),
 	}
+}
+
+// newStateSigner builds the client-state/task-token signer (ISC-175/176).
+// Falls back to a random per-process key when none is configured — tokens
+// simply stop verifying across a restart in that case, which is safe by
+// construction (never a partial-trust fallback), but operators should set
+// Security.StateSigningKey explicitly for continuity across restarts.
+func newStateSigner(cfg *config.Config) *statesign.Signer {
+	key := cfg.Security.StateSigningKey
+	if key == "" {
+		random := make([]byte, 32)
+		_, _ = rand.Read(random) // crypto/rand.Read never errors on the platforms Aegir targets
+		return statesign.NewSigner(random)
+	}
+	return statesign.NewSigner([]byte(key))
 }
 
 // newTaskRegistry builds the async-task registry (ISC-171/172). tools/call is always
@@ -154,6 +175,22 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 				Code:    -32600,
 				Message: "Invalid Request",
 				Data:    "Malformed JSON-RPC request",
+			},
+			ID: req.ID,
+		})
+		return
+	}
+
+	// V4: Header secret/PII/egress scan — request side (ISC-169/170). Runs before
+	// the desync guard/forward so a credential-shaped value never reaches upstream.
+	if findings := p.scanHeaders(c.Request.Header, "request"); headersBlocked(findings) {
+		p.logger.Warn("MCP request blocked by header credential scan",
+			"user_id", p.getUserID(c),
+			"response_path", "block-with-403")
+		c.JSON(http.StatusForbidden, MCPResponse{
+			Error: &MCPError{
+				Code:    -32000,
+				Message: "Request blocked: credential-shaped value detected in HTTP header",
 			},
 			ID: req.ID,
 		})
@@ -197,8 +234,43 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 		return
 	}
 
-	// V6: Async task quota check (ISC-171/172)
 	userID := p.getUserID(c)
+
+	// Spec-transition: replay protection re-anchored on per-connection identity
+	// (ISC-177). The MCP 2026-07-28 spec removes Mcp-Session-Id, which
+	// protocolguard.ReplayCache was previously the obvious (but never actually
+	// wired) anchor for; keying on the authenticated identity instead means
+	// replay detection keeps working once that header is gone. Dormant by
+	// default (Enabled defaults false) — matches the staging convention used
+	// elsewhere in M015 for newly-wired-but-optional controls.
+	if p.config.Security.ReplayProtection.Enabled && req.ID != nil {
+		msgID := fmt.Sprintf("%v", req.ID)
+		if p.replayCache.CheckReplay(userID, msgID, time.Now()) {
+			p.logger.Warn("MCP request blocked: replay detected",
+				"user_id", userID,
+				"msg_id", msgID,
+				"response_path", "block-with-400")
+			c.JSON(http.StatusBadRequest, MCPResponse{
+				Error: &MCPError{
+					Code:    -32600,
+					Message: "Request blocked: duplicate message ID (replay detected)",
+				},
+				ID: req.ID,
+			})
+			return
+		}
+	}
+
+	// V1: tasks/status — resumable task-state lookup (ISC-175/176). A signed
+	// task token is Aegir-internal (only Aegir holds the signing key), so no
+	// upstream server could ever resolve it; handled entirely locally and
+	// never forwarded, regardless of whether an upstream is configured.
+	if req.Method == "tasks/status" {
+		p.handleTaskStatus(c, &req, userID)
+		return
+	}
+
+	// V6: Async task quota check (ISC-171/172)
 
 	// Check if we're within quota before spawning async tasks. Dormant until an
 	// async task lifecycle registers tasks in taskRegistry; Enabled defaults false.
@@ -529,6 +601,13 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 		p.taskRegistry.MarkRunning(asyncTaskID)
 		forwardCtx = taskCtx
 		defer p.taskRegistry.MarkFinished(asyncTaskID)
+
+		// V1: issue a signed, identity-bound token for this task (ISC-175/176)
+		// so the client can poll tasks/status later without the gateway ever
+		// trusting a client-supplied task ID it didn't itself sign.
+		if token, err := p.stateSigner.Sign(statesign.Claims{TaskID: asyncTaskID, Identity: userID}); err == nil {
+			c.Header("X-Aegir-Task-Token", token)
+		}
 	}
 
 	upstreamResp, err := p.upstreamManager.ForwardRequest(forwardCtx, upstreamReq)
@@ -539,6 +618,26 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 		response := p.processMCPMethod(c.Request.Context(), &req)
 		c.JSON(http.StatusOK, response)
 		return
+	}
+
+	// V4: Header secret/PII/egress scan — response side (ISC-169/170). A credential
+	// leaked via an upstream response header is caught here even though Aegir does
+	// not currently relay upstream headers to the client — defense in depth against
+	// the exact leak path the MCP 2026-07-28 x-mcp-header directive introduces.
+	if upstreamResp.Headers != nil {
+		if findings := p.scanHeaders(upstreamResp.Headers, "response"); headersBlocked(findings) {
+			p.logger.Warn("MCP response blocked by header credential scan",
+				"method", req.Method,
+				"response_path", "block-with-403")
+			c.JSON(http.StatusForbidden, MCPResponse{
+				Error: &MCPError{
+					Code:    -32000,
+					Message: "Response blocked: credential-shaped value detected in upstream HTTP header",
+				},
+				ID: req.ID,
+			})
+			return
+		}
 	}
 
 	// Convert upstream response to our response format
@@ -898,6 +997,55 @@ func (p *MCPProxy) mergeToolsList(upstreamResponse *MCPResponse, req *MCPRequest
 	}
 }
 
+// handleTaskStatus resolves a tasks/status request against a client-supplied,
+// gateway-signed task token (ISC-175/176). The token's signature and identity
+// binding are verified before the task registry is ever consulted; an
+// unsigned, tampered, or cross-identity token is rejected outright — the
+// gateway never attempts to "resume" anything it can't first authenticate.
+func (p *MCPProxy) handleTaskStatus(c *gin.Context, req *MCPRequest, userID string) {
+	params, _ := req.Params.(map[string]interface{})
+	token, _ := params["task_token"].(string)
+	if token == "" {
+		c.JSON(http.StatusBadRequest, MCPResponse{
+			Error: &MCPError{Code: -32602, Message: "Invalid params: task_token is required"},
+			ID:    req.ID,
+		})
+		return
+	}
+
+	claims, ok := p.stateSigner.VerifyForIdentity(token, userID)
+	if !ok {
+		p.logger.Warn("Task token rejected: invalid signature or identity mismatch",
+			"user_id", userID,
+			"response_path", "block-with-403")
+		c.JSON(http.StatusForbidden, MCPResponse{
+			Error: &MCPError{
+				Code:    -32000,
+				Message: "Request blocked: invalid or unauthorized task token",
+			},
+			ID: req.ID,
+		})
+		return
+	}
+
+	task, exists := p.taskRegistry.GetTask(claims.TaskID)
+	if !exists {
+		c.JSON(http.StatusOK, MCPResponse{
+			Result: map[string]interface{}{"status": "not_found"},
+			ID:     req.ID,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, MCPResponse{
+		Result: map[string]interface{}{
+			"task_id": task.ID,
+			"status":  string(task.Status),
+		},
+		ID: req.ID,
+	})
+}
+
 // scanToolResultForInjection checks tool-call result text for indirect injection (ISC-22).
 // Returns blocked=true with a detail string if any content fragment is blocked by the sanitizer.
 // Skips gracefully when the sanitizer is nil or the result has no text content.
@@ -922,7 +1070,58 @@ func (p *MCPProxy) scanToolResultForInjection(result interface{}) (blocked bool,
 			}
 		}
 	}
+
+	// ISC-174: MCP App / UI-panel content is a distinct, stricter-scanned class —
+	// it renders directly rather than being merely read by a model, so it goes
+	// through SanitizeAppContent instead of the plain-text SanitizeContent path.
+	for _, html := range extractAppContent(result) {
+		if html == "" {
+			continue
+		}
+		scan := p.sanitizer.SanitizeAppContent(html)
+		if scan.Blocked {
+			return true, fmt.Sprintf("mcp_app active-content, detections=%d", len(scan.Detections))
+		}
+	}
+
 	return false, ""
+}
+
+// extractAppContent pulls HTML destined for an MCP App / UI panel out of a
+// tools/call result, distinct from extractToolResultText's plain-text blocks
+// (ISC-174). The MCP 2026-07-28 Apps content-block wire shape is not pinned
+// down by a schema available in this repo; this recognizes the documented
+// candidate shapes — an explicit "html" field, or a "resource"/"ui"/"app"
+// typed block whose mimeType indicates HTML — rather than one exact wire
+// format. Extend the cases below if the ratified shape differs.
+func extractAppContent(result interface{}) []string {
+	resultMap, ok := result.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	content, ok := resultMap["content"].([]interface{})
+	if !ok {
+		return nil
+	}
+	var htmlBlocks []string
+	for _, item := range content {
+		entry, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if html, ok := entry["html"].(string); ok {
+			htmlBlocks = append(htmlBlocks, html)
+			continue
+		}
+		entryType, _ := entry["type"].(string)
+		mimeType, _ := entry["mimeType"].(string)
+		if (entryType == "resource" || entryType == "ui" || entryType == "app") && strings.Contains(strings.ToLower(mimeType), "html") {
+			if text, ok := entry["text"].(string); ok {
+				htmlBlocks = append(htmlBlocks, text)
+			}
+		}
+	}
+	return htmlBlocks
 }
 
 // summarizeComplianceViolations produces a stable, audit-friendly breakdown of
@@ -1754,7 +1953,7 @@ func sanitizerTypeToCategory(detType string) (dashboard.AttackCategory, bool) {
 		return dashboard.AttackPromptInjection, true
 	case detType == "command_injection":
 		return dashboard.AttackCommandInjection, true
-	case detType == "xss_attempt":
+	case detType == "xss_attempt" || strings.HasPrefix(detType, "xss_"):
 		return dashboard.AttackXSS, true
 	case detType == "sql_injection":
 		return dashboard.AttackSQLInjection, true

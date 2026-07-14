@@ -15,15 +15,15 @@ import (
 
 // Manager handles content sanitization and security filtering
 type Manager struct {
-	config              config.Security
-	logger              *logging.Logger
-	commandInjectionRe  []*regexp.Regexp
-	secretPatterns      []*regexp.Regexp
-	piiPatterns         []*regexp.Regexp
-	phiPatterns         []*regexp.Regexp
-	pciPatterns         []*regexp.Regexp
-	homoglyphPatterns   []*regexp.Regexp
-	xssPatterns         []*regexp.Regexp
+	config               config.Security
+	logger               *logging.Logger
+	commandInjectionRe   []*regexp.Regexp
+	secretPatterns       []*regexp.Regexp
+	piiPatterns          []*regexp.Regexp
+	phiPatterns          []*regexp.Regexp
+	pciPatterns          []*regexp.Regexp
+	homoglyphPatterns    []*regexp.Regexp
+	xssPatterns          []*regexp.Regexp
 	sqlInjectionPatterns []*regexp.Regexp
 
 	// iocPatterns and iocCompiled hold the full IOC pattern set from ioc_patterns.go
@@ -46,12 +46,12 @@ type Manager struct {
 
 // SanitizationResult contains the result of content sanitization
 type SanitizationResult struct {
-	Original        string            `json:"original"`
-	Sanitized       string            `json:"sanitized"`
-	Detections      []Detection       `json:"detections"`
-	Risk            string            `json:"risk"`
-	Blocked         bool              `json:"blocked"`
-	Metadata        map[string]string `json:"metadata"`
+	Original   string            `json:"original"`
+	Sanitized  string            `json:"sanitized"`
+	Detections []Detection       `json:"detections"`
+	Risk       string            `json:"risk"`
+	Blocked    bool              `json:"blocked"`
+	Metadata   map[string]string `json:"metadata"`
 }
 
 // Detection represents a detected security issue
@@ -136,6 +136,44 @@ func (m *Manager) SanitizeContent(content string) *SanitizationResult {
 		result = m.detectBase64Injection(result)
 		result = m.detectPromptInjection(result)
 	}
+
+	return m.finalizeSanitizationResult(result)
+}
+
+// SanitizeAppContent scans MCP App / UI-panel HTML content — a distinct
+// content class from plain tool-result text (ISC-174) — and unconditionally
+// applies the active-content filter regardless of the Sanitization.XSSPrevention
+// operator toggle: an App panel renders its content directly, so disabling XSS
+// scanning for "just text" must not silently disable it for content the client
+// executes. Still gated behind the master Detection.Enabled switch (ISC-132) —
+// an operator who has turned off all detection has made that call deliberately.
+// Any active-content hit blocks outright, a stricter condition than plain
+// text's risk-level aggregation (SanitizeContent blocks only on critical/high).
+func (m *Manager) SanitizeAppContent(html string) *SanitizationResult {
+	result := &SanitizationResult{
+		Original:   html,
+		Sanitized:  html,
+		Detections: []Detection{},
+		Risk:       "low",
+		Blocked:    false,
+		Metadata:   map[string]string{"content_class": "mcp_app"},
+	}
+	if !m.config.Detection.Enabled {
+		result.Metadata["detection"] = "disabled"
+		return result
+	}
+
+	result.Sanitized = m.sanitizeXSS(html, result)
+	result = m.finalizeSanitizationResult(result)
+	if len(result.Detections) > 0 {
+		result.Blocked = true
+	}
+	return result
+}
+
+// finalizeSanitizationResult stamps ATLAS technique IDs and computes the final
+// risk/blocked verdict shared by SanitizeContent's tail.
+func (m *Manager) finalizeSanitizationResult(result *SanitizationResult) *SanitizationResult {
 
 	// Stamp each detection with its MITRE ATLAS technique ID (ISC-80).
 	for i := range result.Detections {
@@ -360,23 +398,39 @@ func (m *Manager) sanitizeContent(result *SanitizationResult) *SanitizationResul
 	return result
 }
 
-// sanitizeXSS removes potential XSS vectors
+// sanitizeXSS removes potential XSS vectors. ISC-173 broadens this beyond
+// <script>/javascript: to cover event-handler attributes, svg-embedded script,
+// unclosed script tags, and data: URIs to a renderable/executable MIME type;
+// detectEncodedXSS (called at the end) additionally decodes base64 blobs to
+// catch the same payloads hidden from a plain-text regex pass.
 func (m *Manager) sanitizeXSS(content string, result *SanitizationResult) string {
 	patterns := []struct {
 		regex       string
 		replacement string
+		detType     string
 	}{
-		{`<script[^>]*>.*?</script>`, "UNSAFE_SCRIPT_REMOVED"},
-		{`javascript:`, "UNSAFE_JAVASCRIPT_REMOVED"},
-		{`on\w+\s*=`, "UNSAFE_EVENT_HANDLER_REMOVED"},
-		{`<iframe[^>]*>.*?</iframe>`, "UNSAFE_IFRAME_REMOVED"},
+		{`<script[^>]*>.*?</script>`, "UNSAFE_SCRIPT_REMOVED", "xss_attempt"},
+		{`javascript:`, "UNSAFE_JAVASCRIPT_REMOVED", "xss_attempt"},
+		{`on\w+\s*=`, "UNSAFE_EVENT_HANDLER_REMOVED", "xss_attempt"},
+		{`<iframe[^>]*>.*?</iframe>`, "UNSAFE_IFRAME_REMOVED", "xss_attempt"},
+		// svg wrapping a script element — flagged distinctly even though the
+		// generic script-tag pattern above would also eventually strip it once
+		// this pass eats up through the literal "<script" substring.
+		{`<svg[^>]*>[\s\S]*?<script`, "UNSAFE_SVG_SCRIPT_REMOVED", "xss_svg_script"},
+		// An opening <script> tag with no closing tag bypasses the well-formed
+		// pattern above entirely; strip any opening tag still standing.
+		{`<script[^>]*>`, "UNSAFE_SCRIPT_REMOVED", "xss_unclosed_script"},
+		// data: URIs to a renderable/executable MIME type are dangerous in an
+		// MCP App panel regardless of encoding; base64/URL-encoded payloads
+		// inside are additionally caught by detectEncodedXSS below.
+		{`data:\s*(?:text/html|text/javascript|application/javascript|application/x-javascript|image/svg\+xml)`, "UNSAFE_DATA_URI_REMOVED", "xss_data_uri"},
 	}
 
 	for _, pattern := range patterns {
 		re := regexp.MustCompile(`(?i)` + pattern.regex)
 		if re.MatchString(content) {
 			detection := Detection{
-				Type:        "xss_attempt",
+				Type:        pattern.detType,
 				Pattern:     pattern.regex,
 				Replacement: pattern.replacement,
 				Severity:    "high",
@@ -386,6 +440,34 @@ func (m *Manager) sanitizeXSS(content string, result *SanitizationResult) string
 		content = re.ReplaceAllString(content, pattern.replacement)
 	}
 
+	content = m.detectEncodedXSS(content, result)
+
+	return content
+}
+
+// xssIndicatorPattern matches the same active-content shapes sanitizeXSS looks
+// for in plain text, run instead against base64-decoded bytes (ISC-173).
+var xssIndicatorPattern = regexp.MustCompile(`(?i)<script[^>]*>|javascript:|on\w+\s*=|<svg[^>]*>`)
+
+// detectEncodedXSS decodes base64 blobs in content and checks the decoded bytes
+// for active-content markers a plain-text regex pass can't see because the
+// payload is encoded — the "encoded variants" bypass ISC-173 calls out.
+func (m *Manager) detectEncodedXSS(content string, result *SanitizationResult) string {
+	for _, blob := range m.base64Re.FindAllString(content, -1) {
+		decoded, err := base64.StdEncoding.DecodeString(blob)
+		if err != nil {
+			continue
+		}
+		if xssIndicatorPattern.Match(decoded) {
+			result.Detections = append(result.Detections, Detection{
+				Type:        "xss_encoded_script",
+				Pattern:     blob,
+				Replacement: "UNSAFE_ENCODED_SCRIPT_REMOVED",
+				Severity:    "high",
+			})
+			content = strings.ReplaceAll(content, blob, "UNSAFE_ENCODED_SCRIPT_REMOVED")
+		}
+	}
 	return content
 }
 

@@ -2,6 +2,9 @@ package auth
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -11,9 +14,9 @@ import (
 	"sync"
 	"time"
 
+	wahandler "github.com/aegishjalmur/aegir/internal/auth/webauthn"
 	"github.com/aegishjalmur/aegir/internal/config"
 	"github.com/aegishjalmur/aegir/internal/logging"
-	wahandler "github.com/aegishjalmur/aegir/internal/auth/webauthn"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -29,7 +32,7 @@ type Manager struct {
 	apiKeys        map[string]*APIKey
 	sessions       map[string]*Session
 	tokenBlacklist sync.Map // stores revoked tokens: token -> expiration time
-	oauthStates    sync.Map // stores OAuth CSRF states: state -> expiration time
+	oauthStates    sync.Map // stores OAuth CSRF state: state -> oauthStateEntry (ISC-178)
 
 	// WebAuthn is non-nil only when config.Auth.WebAuthn.RPID is set.
 	WebAuthn *wahandler.Handler
@@ -409,7 +412,35 @@ func (m *Manager) Logout(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Logged out successfully"})
 }
 
-// OAuthLogin initiates OAuth login
+// oauthStateEntry is what oauthStates stores per in-flight OAuth login: the
+// CSRF state's expiration plus the PKCE code_challenge it was issued with
+// (ISC-178), so OAuthCallback can verify the code_verifier against it.
+type oauthStateEntry struct {
+	expiresAt     time.Time
+	codeChallenge string
+}
+
+// pkceCodeChallengeS256 computes the RFC 7636 S256 code_challenge for a given
+// code_verifier: BASE64URL-ENCODE(SHA256(code_verifier)), no padding.
+func pkceCodeChallengeS256(codeVerifier string) string {
+	sum := sha256.Sum256([]byte(codeVerifier))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+// verifyPKCE reports whether codeVerifier hashes (S256) to codeChallenge,
+// using a constant-time comparison so verification timing doesn't leak how
+// much of the challenge matched.
+func verifyPKCE(codeVerifier, codeChallenge string) bool {
+	if codeVerifier == "" || codeChallenge == "" {
+		return false
+	}
+	computed := pkceCodeChallengeS256(codeVerifier)
+	return subtle.ConstantTimeCompare([]byte(computed), []byte(codeChallenge)) == 1
+}
+
+// OAuthLogin initiates OAuth login. PKCE (RFC 7636, S256 only) is mandatory,
+// not optional, per OAuth 2.1 (ISC-178) — a login request with no
+// code_challenge, or one using the deprecated "plain" method, is rejected.
 func (m *Manager) OAuthLogin(c *gin.Context) {
 	provider := c.Query("provider")
 	if provider == "" {
@@ -417,12 +448,24 @@ func (m *Manager) OAuthLogin(c *gin.Context) {
 		return
 	}
 
+	codeChallenge := c.Query("code_challenge")
+	if codeChallenge == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "code_challenge is required: PKCE is mandatory (OAuth 2.1)"})
+		return
+	}
+	if method := c.Query("code_challenge_method"); method != "S256" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "code_challenge_method must be S256"})
+		return
+	}
+
 	// Generate random state for CSRF protection
 	state := m.generateRandomState(32)
 
-	// Store state in oauthStates map with 10-min expiration
-	stateExpiration := time.Now().Add(10 * time.Minute)
-	m.oauthStates.Store(state, stateExpiration)
+	// Store state + PKCE challenge in oauthStates map with 10-min expiration
+	m.oauthStates.Store(state, oauthStateEntry{
+		expiresAt:     time.Now().Add(10 * time.Minute),
+		codeChallenge: codeChallenge,
+	})
 
 	// Build authorization URL based on provider
 	// For now, we provide a basic structure that can be extended
@@ -440,12 +483,16 @@ func (m *Manager) OAuthLogin(c *gin.Context) {
 	m.logger.Info("OAuth login initiated", "provider", provider, "state", state, "ip", c.ClientIP())
 
 	// Redirect the client to the provider's authorisation endpoint.
-	// Include the state parameter for CSRF protection.
-	redirectTarget := fmt.Sprintf("%s?state=%s&response_type=code", authURL, state)
+	// Include the state parameter for CSRF protection and the PKCE challenge.
+	redirectTarget := fmt.Sprintf("%s?state=%s&response_type=code&code_challenge=%s&code_challenge_method=S256",
+		authURL, state, codeChallenge)
 	c.Redirect(http.StatusFound, redirectTarget)
 }
 
-// OAuthCallback handles OAuth callback
+// OAuthCallback handles OAuth callback. PKCE verification is mandatory
+// (ISC-178): a callback with no code_verifier, or one that doesn't hash to the
+// code_challenge issued at login, is rejected — never falls back to accepting
+// the code on state+CSRF alone.
 func (m *Manager) OAuthCallback(c *gin.Context) {
 	state := c.Query("state")
 	code := c.Query("code")
@@ -455,24 +502,43 @@ func (m *Manager) OAuthCallback(c *gin.Context) {
 		return
 	}
 
+	codeVerifier := c.Query("code_verifier")
+	if codeVerifier == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "code_verifier is required: PKCE is mandatory (OAuth 2.1)"})
+		return
+	}
+
 	// Validate state parameter against stored state
-	storedState, exists := m.oauthStates.Load(state)
+	storedStateRaw, exists := m.oauthStates.Load(state)
 	if !exists {
 		m.logger.Warn("Invalid OAuth state", "ip", c.ClientIP())
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid state parameter"})
 		return
 	}
+	storedState, ok := storedStateRaw.(oauthStateEntry)
+	if !ok {
+		m.logger.Error("OAuth state entry has unexpected type", "ip", c.ClientIP())
+		m.oauthStates.Delete(state)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
 
 	// Check if state has expired
-	if time.Now().After(storedState.(time.Time)) {
+	if time.Now().After(storedState.expiresAt) {
 		m.logger.Warn("OAuth state expired", "ip", c.ClientIP())
 		m.oauthStates.Delete(state)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "State parameter expired"})
 		return
 	}
 
-	// Remove used state
+	// Remove used state (single use, whether or not PKCE verification below passes)
 	m.oauthStates.Delete(state)
+
+	if !verifyPKCE(codeVerifier, storedState.codeChallenge) {
+		m.logger.Warn("PKCE verification failed", "ip", c.ClientIP())
+		c.JSON(http.StatusBadRequest, gin.H{"error": "PKCE verification failed: code_verifier does not match code_challenge"})
+		return
+	}
 
 	provider := c.Query("provider")
 	if provider == "" {

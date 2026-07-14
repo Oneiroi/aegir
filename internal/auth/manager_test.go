@@ -125,7 +125,8 @@ func TestOAuthLoginRedirects(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.provider, func(t *testing.T) {
 			w := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodGet, "/auth/oauth/login?provider="+tt.provider, nil)
+			req := httptest.NewRequest(http.MethodGet,
+				"/auth/oauth/login?provider="+tt.provider+"&code_challenge=test-challenge&code_challenge_method=S256", nil)
 			router.ServeHTTP(w, req)
 
 			if w.Code != http.StatusFound {

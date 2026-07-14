@@ -261,6 +261,18 @@ func (r *Registry) CancelTasksForTenant(tenantID string) int {
 	return count
 }
 
+// GetTask returns the tracked task for the given ID, if any. Used by the
+// resumable-state lookup path (ISC-175/176) after the caller's signed token
+// has already been verified against the requesting identity — this method
+// itself does not check ownership, so callers must not expose it directly to
+// an unverified caller.
+func (r *Registry) GetTask(taskID string) (*TaskInfo, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	task, ok := r.tasks[taskID]
+	return task, ok
+}
+
 // GetTaskCount returns the number of tasks for a user.
 func (r *Registry) GetTaskCount(userID string) int {
 	r.mu.RLock()

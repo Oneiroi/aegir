@@ -108,12 +108,12 @@ func isRestrictedIP(ip net.IP) bool {
 
 // ServiceState represents the current state of an upstream service
 type ServiceState struct {
-	Service          *config.UpstreamService
-	Healthy          bool
-	LastCheck        time.Time
-	FailureCount     int
-	CircuitState     CircuitState
-	LastError        error
+	Service           *config.UpstreamService
+	Healthy           bool
+	LastCheck         time.Time
+	FailureCount      int
+	CircuitState      CircuitState
+	LastError         error
 	ActiveConnections int64
 }
 
@@ -128,15 +128,15 @@ const (
 
 // Manager handles upstream service discovery, load balancing, and health checking
 type Manager struct {
-	config         *config.Upstream
-	logger         *logging.Logger
-	services       map[string]*ServiceState
-	servicesMutex  sync.RWMutex
-	httpClient     *http.Client
-	currentIndex   int
-	indexMutex     sync.Mutex
-	tlsCfg         UpstreamTLSConfig
-	tlsCfgMu       sync.RWMutex
+	config        *config.Upstream
+	logger        *logging.Logger
+	services      map[string]*ServiceState
+	servicesMutex sync.RWMutex
+	httpClient    *http.Client
+	currentIndex  int
+	indexMutex    sync.Mutex
+	tlsCfg        UpstreamTLSConfig
+	tlsCfgMu      sync.RWMutex
 }
 
 // MCPRequest represents a request to forward to upstream services
@@ -151,6 +151,11 @@ type MCPResponse struct {
 	Result interface{} `json:"result,omitempty"`
 	Error  *MCPError   `json:"error,omitempty"`
 	ID     interface{} `json:"id"`
+	// Headers carries the upstream HTTP response's headers (not part of the
+	// JSON-RPC envelope, never marshalled back to the client). ISC-169/170:
+	// lets the gateway scan for credential-shaped values an upstream server
+	// leaked via a response header before anything is forwarded.
+	Headers http.Header `json:"-"`
 }
 
 // MCPError represents an MCP error
@@ -399,7 +404,7 @@ func (m *Manager) forwardRequest(ctx context.Context, service *ServiceState, req
 	defer func() {
 		service.ActiveConnections--
 	}()
-	
+
 	// Create HTTP client with appropriate timeout and TLS settings
 	client := m.createHTTPClient(service)
 
@@ -435,6 +440,8 @@ func (m *Manager) forwardRequest(ctx context.Context, service *ServiceState, req
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("HTTP error %d", resp.StatusCode)
 	}
+
+	mcpResp.Headers = resp.Header.Clone()
 
 	return &mcpResp, nil
 }
@@ -674,7 +681,7 @@ func (m *Manager) GetServiceStatus() map[string]interface{} {
 			"last_check":    service.LastCheck,
 			"failure_count": service.FailureCount,
 			"circuit_state": service.CircuitState,
-			"url":          service.Service.URL,
+			"url":           service.Service.URL,
 		}
 	}
 

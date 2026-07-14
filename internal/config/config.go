@@ -212,12 +212,28 @@ type Security struct {
 	// authenticated identity (ISC-171/172). Disabled by default; only bites once an
 	// async task lifecycle registers tasks in the registry. (MCP 2026-07-28)
 	AsyncTaskQuota AsyncTaskQuotaConfig `json:"async_task_quota" mapstructure:"async_task_quota"`
+	// ReplayProtection re-anchors JSON-RPC message-ID replay detection on the
+	// authenticated identity rather than Mcp-Session-Id, which the MCP
+	// 2026-07-28 spec removes (ISC-177). Disabled by default.
+	ReplayProtection ReplayProtectionConfig `json:"replay_protection" mapstructure:"replay_protection"`
+	// StateSigningKey HMAC-signs resumable state/task-ID tokens the gateway
+	// issues (ISC-175/176) so a client can never forge or tamper with one.
+	// When empty, a random per-process key is generated at startup — tokens
+	// then don't survive a restart, which is safe (they simply stop
+	// verifying) but should be set explicitly in production for continuity.
+	StateSigningKey string `json:"state_signing_key" mapstructure:"state_signing_key"`
 }
 
 // AsyncTaskQuotaConfig configures per-identity async task concurrency limits (ISC-171/172).
 type AsyncTaskQuotaConfig struct {
 	Enabled        bool `json:"enabled"         mapstructure:"enabled"`
 	MaxConcurrency int  `json:"max_concurrency" mapstructure:"max_concurrency"`
+}
+
+// ReplayProtectionConfig configures identity-anchored replay detection (ISC-177).
+type ReplayProtectionConfig struct {
+	Enabled    bool `json:"enabled"     mapstructure:"enabled"`
+	TTLSeconds int  `json:"ttl_seconds" mapstructure:"ttl_seconds"`
 }
 
 // OAuthScopeAuditConfig configures JWT scope auditing and enforcement (ISC-122).
@@ -763,6 +779,10 @@ func setDefaults(v *viper.Viper) {
 	// Async task quota defaults (ISC-171/172): disabled by default; 5 concurrent per identity when on.
 	v.SetDefault("security.async_task_quota.enabled", false)
 	v.SetDefault("security.async_task_quota.max_concurrency", 5)
+
+	// Replay protection defaults (ISC-177): disabled by default; 60s dedup window when on.
+	v.SetDefault("security.replay_protection.enabled", false)
+	v.SetDefault("security.replay_protection.ttl_seconds", 60)
 
 	// Human approval gate defaults (ISC-119): disabled by default; common destructive prefixes.
 	v.SetDefault("security.human_approval.enabled", false)
