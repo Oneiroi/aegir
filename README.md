@@ -18,7 +18,7 @@ MCP tool calls are an unvalidated attack surface. Three confirmed attack paths a
 
 **Indirect Prompt Injection via Tool Results** — Content returned by upstream tool calls flows back into model context. Malicious instructions embedded in a database response, fetched document, or API reply execute with full system prompt authority. Pattern matching at the proxy layer does not catch this without inspecting tool result content.
 
-Aegir mitigates path 1 (SSRF) via parse-time tool-argument URL validation — note that DNS rebinding is not covered at parse time; see [`SECURITY.md`](SECURITY.md). Path 2 (DNS rebinding) is an open gap requiring network-level egress controls. Path 3 (indirect injection via tool results) is an open gap — the inline judge is the intended mechanism, but tool-result content inspection is not yet wired (ISC-22). Anomaly detection is active for encoding-based evasion and high-entropy payloads.
+Aegir mitigates path 1 (SSRF) via parse-time tool-argument URL validation — note that DNS rebinding is not covered at parse time; see [`SECURITY.md`](SECURITY.md). Path 2 (DNS rebinding) is an open gap requiring network-level egress controls. Path 3 (indirect injection via tool results) is implemented — `scanToolResultForInjection()` applies the full detection suite to tools/call result content before forwarding (M008, ISC-22). Anomaly detection is active for encoding-based evasion and high-entropy payloads.
 
 ---
 
@@ -29,15 +29,15 @@ Aegir's detection is mapped against the MITRE ATLAS framework for ML attacks. Fu
 | Technique | Status | Mechanism |
 |---|---|---|
 | AML.T0051.000 — Direct Prompt Injection | implemented | 61 IOC patterns, Aho-Corasick trie, case/spacing/unicode normalisation |
-| AML.T0051.001 — Indirect Prompt Injection | planned | Tool result scanning (M008) |
+| AML.T0051.001 — Indirect Prompt Injection | implemented | `scanToolResultForInjection()` applies full detection suite to tools/call result content before forwarding (M008, ISC-22) |
 | AML.T0053 — Agent Tool Invocation Abuse | implemented | `validateResourceURI()` on URL-typed tool arguments |
 | AML.T0054.001–.006 — Jailbreak variants | implemented | IOC patterns + anomaly scoring |
-| AML.T0054.007 — Crescendo | planned | Requires LLM judge layer (M009) — above transport ceiling |
+| AML.T0054.007 — Crescendo | implemented | LLM judge layer (M009) — semantic detection above the pattern-matching ceiling |
 | AML.T0057 — LLM Data Leakage | partial | Response compliance scan active; extended secret patterns pending |
 | AML.T0012 — Valid Accounts | implemented | JWT + OAuth2 + API key (MCP data path); WebAuthn/FIDO2 MFA (admin management interface) |
 | AML.T0022 — Denial of ML Service | implemented | Per-identity rate limiting, bounded tracking map |
 
-The 62% ceiling is not a failure — it's an honest accounting of what a transport-layer proxy can and cannot do. Crescendo attacks, distributed model extraction, and RAG poisoning require semantic understanding above the pattern-matching layer. The inline LLM judge (M009) provides that capability for single-request semantic attacks. Indirect prompt injection via tool results (ISC-22) and session-level Crescendo detection (ISC-52) are in progress.
+The 62% ceiling is not a failure — it's an honest accounting of what a transport-layer proxy can and cannot do. Crescendo attacks, distributed model extraction, and RAG poisoning require semantic understanding above the pattern-matching layer. The inline LLM judge (M009) provides that capability for single-request semantic attacks. Indirect prompt injection via tool results (ISC-22) and single-session Crescendo detection (ISC-52) are both implemented; cross-session distributed Crescendo (context spread across multiple requests) remains an open gap.
 
 ---
 
