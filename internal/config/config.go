@@ -216,6 +216,11 @@ type Security struct {
 	// authenticated identity rather than Mcp-Session-Id, which the MCP
 	// 2026-07-28 spec removes (ISC-177). Disabled by default.
 	ReplayProtection ReplayProtectionConfig `json:"replay_protection" mapstructure:"replay_protection"`
+	// ToolMetadataInspection runs the tool-metadata integrity detectors over
+	// every tools/list response: ISC-106 (cross-tool shadowing), ISC-107
+	// (description drift), ISC-108 (name collision), ISC-115 (full schema
+	// poisoning), ISC-116 (typosquatting/name confusion). Disabled by default.
+	ToolMetadataInspection ToolMetadataInspectionConfig `json:"tool_metadata_inspection" mapstructure:"tool_metadata_inspection"`
 	// StateSigningKey HMAC-signs resumable state/task-ID tokens the gateway
 	// issues (ISC-175/176) so a client can never forge or tamper with one.
 	// When empty, a random per-process key is generated at startup — tokens
@@ -234,6 +239,21 @@ type AsyncTaskQuotaConfig struct {
 type ReplayProtectionConfig struct {
 	Enabled    bool `json:"enabled"     mapstructure:"enabled"`
 	TTLSeconds int  `json:"ttl_seconds" mapstructure:"ttl_seconds"`
+}
+
+// ToolMetadataInspectionConfig configures the tool-metadata integrity
+// detectors (ISC-106/107/108/115/116). Disabled by default.
+type ToolMetadataInspectionConfig struct {
+	Enabled bool `json:"enabled" mapstructure:"enabled"`
+	// CollisionPolicy controls ISC-108 severity: "warn" (default) logs a high
+	// severity finding; "block" logs critical. Mirrors toolidentity.CollisionPolicy.
+	CollisionPolicy string `json:"collision_policy" mapstructure:"collision_policy"`
+	// ConfusionThreshold is the Levenshtein distance threshold for ISC-116
+	// typosquatting detection. Defaults to 2 (toolidentity.DefaultConfig) when unset/<=0.
+	ConfusionThreshold int `json:"confusion_threshold" mapstructure:"confusion_threshold"`
+	// TrustedNameAllowlist lists tool names ISC-116 protects against
+	// near-match confusion. Empty by default — operators opt in per tool name.
+	TrustedNameAllowlist []string `json:"trusted_name_allowlist" mapstructure:"trusted_name_allowlist"`
 }
 
 // OAuthScopeAuditConfig configures JWT scope auditing and enforcement (ISC-122).
@@ -358,14 +378,15 @@ type SOC2Config struct {
 
 // SessionAnalysis configuration for conversational threat detection
 type SessionAnalysis struct {
-	Enabled                 bool          `json:"enabled" mapstructure:"enabled"`
-	MaxSessionAge           time.Duration `json:"max_session_age" mapstructure:"max_session_age"`
-	MaxHistorySize          int           `json:"max_history_size" mapstructure:"max_history_size"`
-	ThreatThreshold         float64       `json:"threat_threshold" mapstructure:"threat_threshold"`
-	CleanupInterval         time.Duration `json:"cleanup_interval" mapstructure:"cleanup_interval"`
-	JailbreakThreshold      float64       `json:"jailbreak_threshold" mapstructure:"jailbreak_threshold"`
-	RoleEscalationLimit     int           `json:"role_escalation_limit" mapstructure:"role_escalation_limit"`
-	EmotionalManipThreshold float64       `json:"emotional_manip_threshold" mapstructure:"emotional_manip_threshold"`
+	Enabled                  bool          `json:"enabled" mapstructure:"enabled"`
+	MaxSessionAge            time.Duration `json:"max_session_age" mapstructure:"max_session_age"`
+	MaxHistorySize           int           `json:"max_history_size" mapstructure:"max_history_size"`
+	ThreatThreshold          float64       `json:"threat_threshold" mapstructure:"threat_threshold"`
+	CleanupInterval          time.Duration `json:"cleanup_interval" mapstructure:"cleanup_interval"`
+	JailbreakThreshold       float64       `json:"jailbreak_threshold" mapstructure:"jailbreak_threshold"`
+	RoleEscalationLimit      int           `json:"role_escalation_limit" mapstructure:"role_escalation_limit"`
+	EmotionalManipThreshold  float64       `json:"emotional_manip_threshold" mapstructure:"emotional_manip_threshold"`
+	AnomalyEWMADecayHalfLife time.Duration `json:"anomaly_ewma_decay_half_life" mapstructure:"anomaly_ewma_decay_half_life"`
 }
 
 // Upstream configuration for MCP service discovery and proxying
@@ -784,6 +805,14 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("security.replay_protection.enabled", false)
 	v.SetDefault("security.replay_protection.ttl_seconds", 60)
 
+	// Tool-metadata inspection defaults (ISC-106/107/108/115/116): disabled by
+	// default; warn policy, distance-2 confusion threshold, empty allowlist
+	// (opt-in per trusted tool name) when on.
+	v.SetDefault("security.tool_metadata_inspection.enabled", false)
+	v.SetDefault("security.tool_metadata_inspection.collision_policy", "warn")
+	v.SetDefault("security.tool_metadata_inspection.confusion_threshold", 2)
+	v.SetDefault("security.tool_metadata_inspection.trusted_name_allowlist", []string{})
+
 	// Human approval gate defaults (ISC-119): disabled by default; common destructive prefixes.
 	v.SetDefault("security.human_approval.enabled", false)
 	v.SetDefault("security.human_approval.patterns", []string{"delete_", "drop_", "purge_", "format_", "overwrite_"})
@@ -996,14 +1025,15 @@ func LoadLegacy() (*Config, error) {
 			},
 		},
 		SessionAnalysis: SessionAnalysis{
-			Enabled:                 getEnvAsBool("SESSION_ANALYSIS_ENABLED", true),
-			MaxSessionAge:           time.Duration(getEnvAsInt("SESSION_MAX_AGE_MINUTES", 30)) * time.Minute,
-			MaxHistorySize:          getEnvAsInt("SESSION_MAX_HISTORY_SIZE", 50),
-			ThreatThreshold:         getEnvAsFloat("SESSION_THREAT_THRESHOLD", 0.5),
-			CleanupInterval:         time.Duration(getEnvAsInt("SESSION_CLEANUP_MINUTES", 5)) * time.Minute,
-			JailbreakThreshold:      getEnvAsFloat("SESSION_JAILBREAK_THRESHOLD", 0.6),
-			RoleEscalationLimit:     getEnvAsInt("SESSION_ROLE_ESCALATION_LIMIT", 3),
-			EmotionalManipThreshold: getEnvAsFloat("SESSION_EMOTIONAL_MANIP_THRESHOLD", 0.4),
+			Enabled:                  getEnvAsBool("SESSION_ANALYSIS_ENABLED", true),
+			MaxSessionAge:            time.Duration(getEnvAsInt("SESSION_MAX_AGE_MINUTES", 30)) * time.Minute,
+			MaxHistorySize:           getEnvAsInt("SESSION_MAX_HISTORY_SIZE", 50),
+			ThreatThreshold:          getEnvAsFloat("SESSION_THREAT_THRESHOLD", 0.5),
+			CleanupInterval:          time.Duration(getEnvAsInt("SESSION_CLEANUP_MINUTES", 5)) * time.Minute,
+			JailbreakThreshold:       getEnvAsFloat("SESSION_JAILBREAK_THRESHOLD", 0.6),
+			RoleEscalationLimit:      getEnvAsInt("SESSION_ROLE_ESCALATION_LIMIT", 3),
+			EmotionalManipThreshold:  getEnvAsFloat("SESSION_EMOTIONAL_MANIP_THRESHOLD", 0.4),
+			AnomalyEWMADecayHalfLife: time.Duration(getEnvAsInt("SESSION_ANOMALY_EWMA_DECAY_HALF_LIFE_MINUTES", 5)) * time.Minute,
 		},
 		Upstream: Upstream{
 			Services: []UpstreamService{

@@ -1,0 +1,91 @@
+# Aegir — local LLM judge via oMLX (Apple Silicon MLX) example configuration
+#
+# Runs an ABLITERATED local reasoning model as Aegir's LLM judge. The judge is
+# invoked only on SUSPICIOUS-flagged traffic (sanitizer/anomaly output); its job
+# is to READ the adversarial payload and classify it BLOCK / SUSPICIOUS / ALLOW.
+#
+# WHY ABLITERATED (this is deliberate, not a shortcut):
+#   A defensive classifier must parse hostile content — jailbreaks, exfiltration
+#   prompts, harmful instructions — and return a verdict on it. A safety-aligned
+#   model will often REFUSE to engage with such a payload. Aegir treats a judge
+#   refusal or timeout as fail-closed → BLOCK (see AGENTS.md hard constraints),
+#   so a refusing judge gives no discriminating signal: it blocks the benign and
+#   the malicious alike and craters precision. An abliterated (refusal-removed)
+#   model reliably analyses and labels the content instead of declining, which is
+#   exactly what an inspection/judge role needs. It is never generating on behalf
+#   of a user — only classifying quarantined input for the firewall.
+#
+# Prerequisites (oMLX is already installed at /opt/homebrew/bin/omlx):
+#   omlx serve Qwen3.6-27B-Claude-Opus-Reasoning-Distill-v2-abliterated-OptiQ-3.7bpw-mlx --port 8000
+#   # (or: just judge-omlx-serve)
+#
+# Then run Aegir against this config:
+#   MCP_SERVER_TLS_ENABLED=false ./bin/aegir --config aegir.omlx-judge.example.yaml
+#   # (or: just run-judge-omlx-qwen)
+#
+# Alternative abliterated local judges (swap judge.model, keep provider/base_url):
+#   Qwen3.6-27B-Claude-Opus-Reasoning-Distill-v2-abliterated-OptiQ-3.7bpw-mlx   (~14 GB, primary)
+#   Ornith-1.0-9B-8bit-abliterated                                             (~15 GB, faster, lower recall)
+#   any OpenAI-compatible MLX endpoint on :8000/v1
+
+environment: development
+
+server:
+  port: 8443
+  host: localhost
+  tls:
+    enabled: false        # set true for production; supply cert_file and key_file
+    cert_file: certs/cert.pem
+    key_file: certs/key.pem
+
+auth:
+  jwt:
+    secret: "change-for-production-minimum-32-characters"
+    issuer: "aegir"
+  api_keys:
+    enabled: true
+
+logging:
+  level: info
+  format: text
+  hmac_key: "development-hmac-key-that-is-definitely-32-characters-long"
+
+security:
+  detection:
+    enabled: true
+    response_policy: block
+  sanitization:
+    enabled: true
+    prompt_injection: true
+  # Anomaly scoring gates what reaches the judge. Raising block_threshold sends
+  # borderline traffic to the judge (SUSPICIOUS) instead of hard-blocking it,
+  # which is where an accurate judge buys back false positives.
+  anomaly_detection:
+    enabled: true
+    block_threshold: 0.85   # score above this → SUSPICIOUS → routed to judge
+    log_threshold: 0.60
+
+judge:
+  enabled: true
+  provider: openai          # oMLX exposes an OpenAI-compatible /v1 API
+  base_url: http://localhost:8000/v1
+  model: Qwen3.6-27B-Claude-Opus-Reasoning-Distill-v2-abliterated-OptiQ-3.7bpw-mlx
+  api_key: "omlx"           # oMLX currently requires a bearer token; the value is literally "omlx"
+  timeout_ms: 15000         # local 27B reasoning pass; fail-closed → BLOCK on timeout
+  expose_reasoning: false   # keep judge reasoning server-side (GDPR/PCI: never echo payload)
+
+  # Optional ordered failover on TRANSPORT error of the primary (never on a
+  # verdict or refusal). Point at a lighter local model so a judge crash does
+  # not force every SUSPICIOUS request to fail-closed.
+  # fallbacks:
+  #   - provider: openai
+  #     base_url: http://localhost:8000/v1
+  #     model: Ornith-1.0-9B-8bit-abliterated
+  #     api_key: "omlx"
+
+upstream:
+  services:
+    - name: local-mcp-service
+      url: http://localhost:8080
+      enabled: true
+      timeout: 30

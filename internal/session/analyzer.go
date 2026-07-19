@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"strings"
 	"sync"
@@ -24,40 +25,40 @@ type ConversationalThreatAnalyzer struct {
 
 // SlidingWindowStats tracks repetition statistics over sliding windows
 type SlidingWindowStats struct {
-	WindowStart      time.Time             `json:"window_start"`
-	MessageCount     int                   `json:"message_count"`
-	QueryPatterns    []string              `json:"query_patterns"`
-	RepetitionCount  int                   `json:"repetition_count"`
-	UniformityScore  float64               `json:"uniformity_score"`
-	MaxRepetition    int                   `json:"max_repetition"`
-	RepetitionHistory []int                `json:"repetition_history"`
+	WindowStart       time.Time `json:"window_start"`
+	MessageCount      int       `json:"message_count"`
+	QueryPatterns     []string  `json:"query_patterns"`
+	RepetitionCount   int       `json:"repetition_count"`
+	UniformityScore   float64   `json:"uniformity_score"`
+	MaxRepetition     int       `json:"max_repetition"`
+	RepetitionHistory []int     `json:"repetition_history"`
 }
 
 // ModelExtractionReport tracks model extraction detection results
 type ModelExtractionReport struct {
-	Detected           bool     `json:"detected"`
-	UniformityScore    float64  `json:"uniformity_score"`
-	RepetitionCount    int      `json:"repetition_count"`
-	MaxRepetition      int      `json:"max_repetition"`
-	UniformQueries     []string `json:"uniform_queries"`
-	DetectionMethod    string   `json:"detection_method"`
-	ConfidenceLevel    string   `json:"confidence_level"`
+	Detected        bool     `json:"detected"`
+	UniformityScore float64  `json:"uniformity_score"`
+	RepetitionCount int      `json:"repetition_count"`
+	MaxRepetition   int      `json:"max_repetition"`
+	UniformQueries  []string `json:"uniform_queries"`
+	DetectionMethod string   `json:"detection_method"`
+	ConfidenceLevel string   `json:"confidence_level"`
 }
 
 // SessionContext tracks conversation state and threat indicators
 type SessionContext struct {
-	SessionID      string               `json:"session_id"`
-	UserID         string               `json:"user_id"`
-	StartTime      time.Time            `json:"start_time"`
-	LastActivity   time.Time            `json:"last_activity"`
-	MessageCount   int                  `json:"message_count"`
-	ThreatScore    float64              `json:"threat_score"`
-	RoleEscalation int                  `json:"role_escalation_attempts"`
-	JailbreakScore float64              `json:"jailbreak_score"`
-	History        []MessageContext     `json:"history"`
-	Flags          map[string]int       `json:"flags"`
-	Risk           string               `json:"risk_level"`
-	SlidingWindow  *SlidingWindowStats  `json:"sliding_window"`
+	SessionID      string              `json:"session_id"`
+	UserID         string              `json:"user_id"`
+	StartTime      time.Time           `json:"start_time"`
+	LastActivity   time.Time           `json:"last_activity"`
+	MessageCount   int                 `json:"message_count"`
+	ThreatScore    float64             `json:"threat_score"`
+	RoleEscalation int                 `json:"role_escalation_attempts"`
+	JailbreakScore float64             `json:"jailbreak_score"`
+	History        []MessageContext    `json:"history"`
+	Flags          map[string]int      `json:"flags"`
+	Risk           string              `json:"risk_level"`
+	SlidingWindow  *SlidingWindowStats `json:"sliding_window"`
 
 	// ISC-16: rolling EWMA anomaly score across messages
 	AnomalyEWMA float64 `json:"anomaly_ewma"`
@@ -130,6 +131,11 @@ type AnalyzerConfig struct {
 	// ISC-16: EWMA smoothing factor α ∈ (0,1] and block threshold
 	AnomalyEWMAAlpha      float64 `json:"anomaly_ewma_alpha"`
 	AnomalyBlockThreshold float64 `json:"anomaly_block_threshold"`
+
+	// ISC-16: EWMA decay half-life. The EWMA is decayed by elapsed time since
+	// the last message so a session that stops receiving adversarial traffic
+	// can recover instead of remaining latched. Zero or negative disables decay.
+	AnomalyEWMADecayHalfLife time.Duration `json:"anomaly_ewma_decay_half_life"`
 
 	// ISC-112: sliding window for sequence detection
 	SequenceWindowSize time.Duration `json:"sequence_window_size"`
@@ -209,6 +215,9 @@ func NewConversationalThreatAnalyzer(config AnalyzerConfig, logger *logging.Logg
 	if config.AnomalyBlockThreshold <= 0 {
 		config.AnomalyBlockThreshold = 0.70
 	}
+	if config.AnomalyEWMADecayHalfLife <= 0 {
+		config.AnomalyEWMADecayHalfLife = 5 * time.Minute
+	}
 	// ISC-112 defaults
 	if config.SequenceWindowSize <= 0 {
 		config.SequenceWindowSize = 10 * time.Minute
@@ -268,7 +277,18 @@ func (cta *ConversationalThreatAnalyzer) AnalyzeMessage(sessionID, userID, conte
 	msgCtx := cta.analyzeMessageContent(content)
 
 	// Update session context
-	session.LastActivity = time.Now()
+	now := time.Now()
+	// ISC-16: decay the EWMA based on elapsed time since the last message so a
+	// session that stops receiving adversarial traffic can recover instead of
+	// remaining permanently latched.
+	if elapsed := now.Sub(session.LastActivity); elapsed > 0 {
+		halfLife := cta.config.AnomalyEWMADecayHalfLife
+		if halfLife > 0 {
+			decay := math.Exp(-float64(elapsed) / float64(halfLife) * math.Ln2)
+			session.AnomalyEWMA *= decay
+		}
+	}
+	session.LastActivity = now
 	session.MessageCount++
 	session.History = append(session.History, msgCtx)
 
@@ -856,12 +876,28 @@ func (cta *ConversationalThreatAnalyzer) GetSessionContext(sessionID string) *Se
 	return nil
 }
 
-// DeleteSession removes a session by ID
+// DeleteSession removes a session by ID.
 func (cta *ConversationalThreatAnalyzer) DeleteSession(sessionID string) {
 	cta.mutex.Lock()
 	defer cta.mutex.Unlock()
 
 	delete(cta.sessions, sessionID)
+	for userID, userSess := range cta.userSessions {
+		delete(userSess, sessionID)
+		if len(userSess) == 0 {
+			delete(cta.userSessions, userID)
+		}
+	}
+}
+
+// ClearAllSessions removes every tracked session. Intended for test/debug
+// state recycling and GDPR right-to-erasure; use with care in production.
+func (cta *ConversationalThreatAnalyzer) ClearAllSessions() {
+	cta.mutex.Lock()
+	defer cta.mutex.Unlock()
+
+	cta.sessions = make(map[string]*SessionContext)
+	cta.userSessions = make(map[string]map[string]*SessionContext)
 }
 
 // detectModelExtraction detects uniform query patterns from same user over sliding window
@@ -1042,10 +1078,10 @@ func (cta *ConversationalThreatAnalyzer) GetAllModelExtractionReports() map[stri
 	for sessionID, session := range cta.sessions {
 		if session.SlidingWindow != nil {
 			report := &ModelExtractionReport{
-				UniformityScore:  session.SlidingWindow.UniformityScore,
-				RepetitionCount:  session.SlidingWindow.RepetitionCount,
-				MaxRepetition:    session.SlidingWindow.MaxRepetition,
-				UniformQueries:   session.SlidingWindow.QueryPatterns,
+				UniformityScore: session.SlidingWindow.UniformityScore,
+				RepetitionCount: session.SlidingWindow.RepetitionCount,
+				MaxRepetition:   session.SlidingWindow.MaxRepetition,
+				UniformQueries:  session.SlidingWindow.QueryPatterns,
 			}
 			reports[sessionID] = report
 		}

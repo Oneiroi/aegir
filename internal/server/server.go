@@ -109,12 +109,13 @@ func New(cfg *config.Config) (*MCPFirewall, error) {
 	var sessionAnalyzer *session.ConversationalThreatAnalyzer
 	if cfg.SessionAnalysis.Enabled {
 		analyzerConfig := session.AnalyzerConfig{
-			MaxSessionAge:       cfg.SessionAnalysis.MaxSessionAge,
-			MaxHistorySize:      cfg.SessionAnalysis.MaxHistorySize,
-			ThreatThreshold:     cfg.SessionAnalysis.ThreatThreshold,
-			CleanupInterval:     cfg.SessionAnalysis.CleanupInterval,
-			JailbreakThreshold:  cfg.SessionAnalysis.JailbreakThreshold,
-			RoleEscalationLimit: cfg.SessionAnalysis.RoleEscalationLimit,
+			MaxSessionAge:            cfg.SessionAnalysis.MaxSessionAge,
+			MaxHistorySize:           cfg.SessionAnalysis.MaxHistorySize,
+			ThreatThreshold:          cfg.SessionAnalysis.ThreatThreshold,
+			CleanupInterval:          cfg.SessionAnalysis.CleanupInterval,
+			JailbreakThreshold:       cfg.SessionAnalysis.JailbreakThreshold,
+			RoleEscalationLimit:      cfg.SessionAnalysis.RoleEscalationLimit,
+			AnomalyEWMADecayHalfLife: cfg.SessionAnalysis.AnomalyEWMADecayHalfLife,
 		}
 		sessionAnalyzer = session.NewConversationalThreatAnalyzer(analyzerConfig, logger)
 	}
@@ -229,6 +230,9 @@ func (s *MCPFirewall) setupRouter() {
 			security.GET("/sessions", s.getSessions)
 			security.GET("/sessions/:id", s.getSession)
 			security.DELETE("/sessions/:id", s.deleteSession)
+			// Test/debug helper: clear all session state so long-running efficacy
+			// harnesses can recycle without restarting the process. Requires auth.
+			security.DELETE("/sessions", s.deleteAllSessions)
 		}
 
 		// GDPR right-to-erasure endpoint (ISC-64).
@@ -656,6 +660,23 @@ func (s *MCPFirewall) deleteSession(c *gin.Context) {
 	s.sessionAnalyzer.DeleteSession(sessionID)
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Session deleted successfully",
+	})
+}
+
+// deleteAllSessions clears all session state. Auth-gated; intended for
+// long-running test harnesses that need to recycle state without restarting
+// the process, and for GDPR bulk erasure.
+func (s *MCPFirewall) deleteAllSessions(c *gin.Context) {
+	if s.sessionAnalyzer == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Session analysis is not enabled",
+		})
+		return
+	}
+
+	s.sessionAnalyzer.ClearAllSessions()
+	c.JSON(http.StatusOK, gin.H{
+		"message": "All sessions cleared successfully",
 	})
 }
 

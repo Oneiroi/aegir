@@ -39,12 +39,12 @@ func TestConversationalAttackDetection(t *testing.T) {
 	analyzer := NewConversationalThreatAnalyzer(analyzerConfig, logger)
 
 	testCases := []struct {
-		name            string
-		conversation    []string
-		expectedThreat  float64
+		name             string
+		conversation     []string
+		expectedThreat   float64
 		expectedPatterns []string
-		shouldBlock     bool
-		description     string
+		shouldBlock      bool
+		description      string
 	}{
 		{
 			name: "incremental_dan_jailbreak",
@@ -287,8 +287,8 @@ func TestConversationEvolution(t *testing.T) {
 	}
 
 	phases := []struct {
-		name     string
-		messages []string
+		name      string
+		messages  []string
 		maxThreat float64
 	}{
 		{"benign", benignPhase, 0.2},
@@ -404,13 +404,13 @@ func TestSessionLevelAnomalyBlock(t *testing.T) {
 // "sequence_anomaly" in AttackPatterns.
 func TestToolCallSequenceAnomaly(t *testing.T) {
 	analyzerConfig := AnalyzerConfig{
-		MaxSessionAge:      30 * time.Minute,
-		MaxHistorySize:     50,
-		ThreatThreshold:    0.3,
-		CleanupInterval:    5 * time.Minute,
-		JailbreakThreshold: 0.6,
+		MaxSessionAge:       30 * time.Minute,
+		MaxHistorySize:      50,
+		ThreatThreshold:     0.3,
+		CleanupInterval:     5 * time.Minute,
+		JailbreakThreshold:  0.6,
 		RoleEscalationLimit: 3,
-		SequenceWindowSize: 10 * time.Minute,
+		SequenceWindowSize:  10 * time.Minute,
 	}
 
 	logger := createTestLogger()
@@ -634,10 +634,10 @@ func TestEntropyThresholdDefault(t *testing.T) {
 // TestUniformityThresholdDetection tests varying uniformity thresholds
 func TestUniformityThresholdDetection(t *testing.T) {
 	testCases := []struct {
-		name              string
-		queries           []string
-		expectedDetected  bool
-		description       string
+		name             string
+		queries          []string
+		expectedDetected bool
+		description      string
 	}{
 		{
 			name: "high_uniformity_detected",
@@ -703,5 +703,48 @@ func TestUniformityThresholdDetection(t *testing.T) {
 					window.UniformityScore)
 			}
 		})
+	}
+} // TestAnomalyEWMADecay verifies that the per-session anomaly EWMA decays when
+// time passes between messages, so a session can recover from a burst of
+// adversarial traffic instead of remaining permanently latched.
+func TestAnomalyEWMADecay(t *testing.T) {
+	cfg := AnalyzerConfig{
+		MaxSessionAge:            30 * time.Minute,
+		MaxHistorySize:           50,
+		ThreatThreshold:          0.5,
+		CleanupInterval:          5 * time.Minute,
+		JailbreakThreshold:       0.6,
+		RoleEscalationLimit:      3,
+		AnomalyEWMAAlpha:         0.5,
+		AnomalyBlockThreshold:    0.70,
+		AnomalyEWMADecayHalfLife: 50 * time.Millisecond,
+	}
+
+	logger := createTestLogger()
+	analyzer := NewConversationalThreatAnalyzer(cfg, logger)
+	defer analyzer.Stop()
+
+	sessionID := "ewma-decay-test"
+	userID := "test-user"
+
+	// Seed the session with a latched EWMA directly so the test is independent
+	// of the exact scoring of any particular payload.
+	sess := analyzer.getOrCreateSession(sessionID, userID)
+	sess.AnomalyEWMA = 0.90
+
+	// Wait for decay, then send a low-threat message. The decayed EWMA should
+	// drop well below the block threshold before the new message is folded in.
+	time.Sleep(200 * time.Millisecond)
+	analyzer.AnalyzeMessage(sessionID, userID, "hello")
+	ewmaAfterDecay := analyzer.sessions[sessionID].AnomalyEWMA
+	t.Logf("EWMA after decay and one benign message: %.4f", ewmaAfterDecay)
+	if ewmaAfterDecay >= cfg.AnomalyBlockThreshold {
+		t.Errorf("EWMA did not decay below block threshold: %.4f >= %.4f", ewmaAfterDecay, cfg.AnomalyBlockThreshold)
+	}
+
+	// Verify the EWMA would have stayed above the threshold without decay by
+	// checking the decayed value is significantly lower than the seeded 0.90.
+	if ewmaAfterDecay > 0.5 {
+		t.Errorf("EWMA decay appears ineffective: %.4f still high after 4 half-lives", ewmaAfterDecay)
 	}
 }

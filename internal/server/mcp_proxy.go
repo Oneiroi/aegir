@@ -27,6 +27,8 @@ import (
 	"github.com/aegishjalmur/aegir/internal/session"
 	"github.com/aegishjalmur/aegir/internal/statesign"
 	"github.com/aegishjalmur/aegir/internal/tasks"
+	"github.com/aegishjalmur/aegir/internal/toolidentity"
+	"github.com/aegishjalmur/aegir/internal/toolmeta"
 	"github.com/aegishjalmur/aegir/internal/upstream"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -49,6 +51,11 @@ type MCPProxy struct {
 	stateSigner       *statesign.Signer
 	anomalyCount      atomic.Uint64
 	anomalyScoreSum   atomic.Uint64 // stored as score*1e6 to avoid float atomics
+
+	// Tool-metadata integrity detectors (ISC-106/107/108/115/116): dormant
+	// unless Security.ToolMetadataInspection.Enabled.
+	toolMetaScanner     *toolmeta.Scanner
+	toolIdentityChecker *toolidentity.Checker
 
 	// Recon rate limit (ISC-121): per-session tools/list call timestamps.
 	reconMu    sync.Mutex
@@ -132,7 +139,27 @@ func NewMCPProxy(cfg *config.Config, logger *logging.Logger, sanitizerMgr *sanit
 		taskRegistry:  newTaskRegistry(cfg),
 		replayCache:   protocolguard.NewReplayCache(time.Duration(cfg.Security.ReplayProtection.TTLSeconds) * time.Second),
 		stateSigner:   newStateSigner(cfg),
+
+		toolMetaScanner:     toolmeta.NewScanner(),
+		toolIdentityChecker: toolidentity.NewChecker(newToolIdentityCheckerConfig(cfg)),
 	}
+}
+
+// newToolIdentityCheckerConfig builds the toolidentity.CheckerConfig from
+// Security.ToolMetadataInspection (ISC-108/115/116). Falls back to the
+// package defaults for zero-value fields so an all-default config behaves
+// exactly like toolidentity.DefaultConfig().
+func newToolIdentityCheckerConfig(cfg *config.Config) toolidentity.CheckerConfig {
+	c := toolidentity.DefaultConfig()
+	tm := cfg.Security.ToolMetadataInspection
+	if tm.CollisionPolicy == string(toolidentity.PolicyBlock) {
+		c.CollisionPolicy = toolidentity.PolicyBlock
+	}
+	if tm.ConfusionThreshold > 0 {
+		c.ConfusionThreshold = tm.ConfusionThreshold
+	}
+	c.TrustedNameAllowlist = tm.TrustedNameAllowlist
+	return c
 }
 
 // newStateSigner builds the client-state/task-token signer (ISC-175/176).
@@ -952,6 +979,11 @@ func (p *MCPProxy) builtinTools() []interface{} {
 func (p *MCPProxy) handleToolsListMerged(ctx context.Context, req *MCPRequest) *MCPResponse {
 	merged := append([]interface{}{}, p.builtinTools()...)
 	merged = append(merged, p.fetchUpstreamTools(ctx, req)...)
+	// ISC-106/107/108/115/116: tool-metadata integrity detectors (dormant
+	// unless Security.ToolMetadataInspection.Enabled) — fallback/no-upstream
+	// path mirrors the wiring in mergeToolsList so both tools/list branches
+	// of HandleMCPRequest are covered.
+	p.inspectToolMetadata(merged, len(p.builtinTools()))
 	return &MCPResponse{
 		Result: map[string]interface{}{"tools": merged},
 		ID:     req.ID,
@@ -991,10 +1023,138 @@ func (p *MCPProxy) mergeToolsList(upstreamResponse *MCPResponse, req *MCPRequest
 			}
 		}
 	}
+	// ISC-106/107/108/115/116: tool-metadata integrity detectors over the
+	// merged corpus (dormant unless Security.ToolMetadataInspection.Enabled).
+	p.inspectToolMetadata(merged, len(p.builtinTools()))
 	return &MCPResponse{
 		Result: map[string]interface{}{"tools": merged},
 		ID:     req.ID,
 	}
+}
+
+// inspectToolMetadata runs the tool-metadata integrity detectors — ISC-106
+// (cross-tool shadowing), ISC-107 (description drift), ISC-108 (name
+// collision), ISC-115 (full schema poisoning), ISC-116 (typosquatting) —
+// over a merged tools/list result and logs findings as security events.
+// Dormant unless Security.ToolMetadataInspection.Enabled (staging convention
+// mirrored from ReplayProtection/AsyncTaskQuota — see newTaskRegistry).
+//
+// builtinCount marks how many leading entries in tools are Aegir's own
+// built-in tools (always prepended by mergeToolsList/handleToolsListMerged);
+// everything after that index is registered under the "upstream" namespace
+// so ISC-108 can catch an upstream tool shadowing a trusted built-in name.
+func (p *MCPProxy) inspectToolMetadata(tools []interface{}, builtinCount int) {
+	if p.config == nil || !p.config.Security.ToolMetadataInspection.Enabled {
+		return
+	}
+	if p.toolMetaScanner == nil || p.toolIdentityChecker == nil {
+		return
+	}
+
+	metaTools := make([]toolmeta.Tool, 0, len(tools))
+	type identityEntry struct {
+		schema toolidentity.SchemaTool
+		ns     string
+	}
+	identityTools := make([]identityEntry, 0, len(tools))
+
+	for i, raw := range tools {
+		tm, ok := raw.(map[string]interface{})
+		if !ok || tm == nil {
+			continue
+		}
+		name, _ := tm["name"].(string)
+		if name == "" {
+			continue
+		}
+		desc, _ := tm["description"].(string)
+		version, _ := tm["version"].(string)
+
+		metaTools = append(metaTools, toolmeta.Tool{Name: name, Description: desc, Version: version})
+
+		ns := "upstream"
+		if i < builtinCount {
+			ns = "aegir-builtin"
+		}
+		identityTools = append(identityTools, identityEntry{
+			schema: toolidentity.SchemaTool{Name: name, Version: version, Params: extractSchemaParams(tm)},
+			ns:     ns,
+		})
+	}
+
+	for _, ev := range p.toolMetaScanner.Scan(metaTools) {
+		p.logToolMetaEvent(ev.Type, ev.Severity, ev.Message, ev.ToolName, ev.Details)
+	}
+
+	for _, it := range identityTools {
+		for _, ev := range p.toolIdentityChecker.Register(it.ns, it.schema.Name) {
+			p.logToolMetaEvent(ev.Type, ev.Severity, ev.Message, ev.ToolName, ev.Details)
+		}
+		for _, ev := range p.toolIdentityChecker.CheckSchema(it.schema) {
+			p.logToolMetaEvent(ev.Type, ev.Severity, ev.Message, ev.ToolName, ev.Details)
+		}
+	}
+}
+
+// logToolMetaEvent forwards a toolmeta/toolidentity finding to the security
+// audit log, matching the existing SecurityEvent shape used throughout this
+// file (see trackReconCall).
+func (p *MCPProxy) logToolMetaEvent(eventType, severity, message, toolName string, details map[string]string) {
+	if p.logger == nil {
+		return
+	}
+	merged := make(map[string]string, len(details)+1)
+	for k, v := range details {
+		merged[k] = v
+	}
+	merged["tool_name"] = toolName
+	p.logger.LogSecurityEvent(&logging.SecurityEvent{
+		Type:      eventType,
+		Severity:  severity,
+		Message:   message,
+		Timestamp: time.Now(),
+		Details:   merged,
+	})
+}
+
+// extractSchemaParams reads an MCP tool's inputSchema.properties/required
+// into toolidentity.Param fingerprints for ISC-115 (full schema poisoning)
+// detection. Returns nil for a missing or malformed schema — CheckSchema
+// treats that as a tool with no parameters, a safe default (an absent
+// schema can't itself be flagged as "changed" on first receipt).
+func extractSchemaParams(tm map[string]interface{}) []toolidentity.Param {
+	schema, _ := tm["inputSchema"].(map[string]interface{})
+	if schema == nil {
+		return nil
+	}
+	props, _ := schema["properties"].(map[string]interface{})
+	if props == nil {
+		return nil
+	}
+
+	required := map[string]bool{}
+	switch req := schema["required"].(type) {
+	case []interface{}:
+		for _, r := range req {
+			if s, ok := r.(string); ok {
+				required[s] = true
+			}
+		}
+	case []string:
+		for _, s := range req {
+			required[s] = true
+		}
+	}
+
+	params := make([]toolidentity.Param, 0, len(props))
+	for name, raw := range props {
+		typ := ""
+		if pm, ok := raw.(map[string]interface{}); ok {
+			typ, _ = pm["type"].(string)
+		}
+		params = append(params, toolidentity.Param{Name: name, Type: typ, Required: required[name]})
+	}
+	return params
 }
 
 // handleTaskStatus resolves a tasks/status request against a client-supplied,
@@ -2010,17 +2170,42 @@ func (p *MCPProxy) getUserID(c *gin.Context) string {
 	return "anonymous"
 }
 
-// getSessionID extracts or generates a session ID from context
+// getSessionID extracts or generates a session ID from context.
+// It honours the client-supplied X-Session-ID header when present so that
+// multi-turn / SPIKEE replay sessions are isolated per-session rather than
+// collapsing all traffic from the same user/IP into one SessionContext.
+// The header value is treated as an opaque identifier and sanitized.
 func (p *MCPProxy) getSessionID(c *gin.Context) string {
 	if sessionID, exists := c.Get("session_id"); exists {
 		if sid, ok := sessionID.(string); ok && sid != "" {
 			return sid
 		}
 	}
+	if headerSID := c.GetHeader("X-Session-ID"); headerSID != "" {
+		return sanitizeSessionID(headerSID)
+	}
 	// Generate a session ID from user ID and client IP if not found
 	userID := p.getUserID(c)
 	clientIP := c.ClientIP()
 	return fmt.Sprintf("%s_%s", userID, clientIP)
+}
+
+// sanitizeSessionID clamps a client-supplied session identifier to a safe
+// length and strips non-printable/control characters. The value is treated
+// as an opaque identifier, not a trust signal.
+func sanitizeSessionID(s string) string {
+	const maxLen = 128
+	if len(s) > maxLen {
+		s = s[:maxLen]
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r > ' ' && r < 0x7f {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // sanitizerVerdictToJudge maps the sanitizer's risk signal to a judge routing

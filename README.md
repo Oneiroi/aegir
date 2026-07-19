@@ -163,6 +163,9 @@ Full scope boundary with machine-readable coverage map: [`SCOPE.md`](SCOPE.md) a
 | M009 | LLM judge layer — async hold-and-decide, Ollama local default | Shipped (sync judge + hold wired; MCP-native progress pending SSE transport) |
 | M012 | Aho-Corasick detection trie (stdlib, no new deps) | Shipped |
 | M013 | Judge backend portability — Ollama / OpenAI-compatible / Anthropic adapters + transport-error failover | Shipped |
+| M014 | Pre-OSS security audit remediation (1 CRITICAL + 4 HIGH + 5 MED + 5 LOW) | Shipped |
+| M015 | MCP 2026-07-28 spec hardening (13 ISCs: header validation, meta inspection, async quota, XSS hardening, signed state, PKCE) | Shipped |
+| M016 | LLMVault reference integration; defensive-architecture positioning (documentation + mapping guide) | **In progress** |
 
 ---
 
@@ -178,6 +181,12 @@ Aegir's differentiation: MITRE ATLAS mapping with published technique-level cove
 
 ---
 
+## Learning & validation
+
+Practitioners learning MCP attack patterns should start here, then deploy Aegir to practice defense:
+
+- **[LLMVault](https://github.com/CyberSunil/LLMVault)** — Deliberately-vulnerable CTF-style training platform. 25 labs across three tiers (core, advanced, expert) teaching the OWASP Top 10 for LLM Applications (2025): prompt injection, data exfiltration, supply chain poisoning, model poisoning, output handling, excessive agency, system prompt leakage, and more. Each lab includes a private solutions guide showing the defense. **Aegir is the reference implementation for defending these attack classes** — see [`docs/LLMVAULT-DEFENSIVE-MAPPING.md`](docs/LLMVAULT-DEFENSIVE-MAPPING.md) for a category-by-category walkthrough.
+
 ## Research
 
 The threat model preceded the implementation. The ATLAS gap analysis was written before the first line of proxy code.
@@ -185,6 +194,7 @@ The threat model preceded the implementation. The ATLAS gap analysis was written
 - [`MITRE-ATLAS-GAP-ANALYSIS.md`](MITRE-ATLAS-GAP-ANALYSIS.md) — Full technique-by-technique analysis with P1/P2/P3 gap prioritisation
 - [`SCOPE.md`](SCOPE.md) — Honest scope boundary with machine-readable companion
 - [`REDTEAM-REPORT-20260520.md`](REDTEAM-REPORT-20260520.md) — Red team findings against the current implementation
+- [`docs/LLMVAULT-DEFENSIVE-MAPPING.md`](docs/LLMVAULT-DEFENSIVE-MAPPING.md) — How Aegir defends against each LLMVault lab category (reference-architecture guide)
 
 ---
 
