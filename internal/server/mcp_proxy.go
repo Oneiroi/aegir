@@ -61,6 +61,12 @@ type MCPProxy struct {
 	// Recon rate limit (ISC-121): per-session tools/list call timestamps.
 	reconMu    sync.Mutex
 	reconCalls map[string][]time.Time // key: session ID → slice of call timestamps
+
+	// Session-creation rotation tracker (F4b, bundle 3): caps the number of
+	// distinct client-influenced session IDs an identity may create; beyond
+	// the limit the identity degrades to the shared userID_ip key.
+	sidRotationMu    sync.Mutex
+	sidRotationState map[string]*sidRotationIdentity
 }
 
 // AnomalyStats holds aggregate anomaly scoring data for metrics.
@@ -383,29 +389,50 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 			return
 		}
 
-		// High risk (score 0.6-0.79): Maximum sanitization, forward with X-Aegir-Risk header
+		// High risk: maximum sanitization, then forward (B1, bundle 3: no
+		// score headers on egress — the score stays in the HMAC log).
 		if assessment.ConversationRisk == "high" {
 			p.logger.Warn("MCP request forwarded with high risk sanitization",
 				"session_id", sessionID,
 				"user_id", userID,
 				"threat_score", assessment.CurrentThreatScore,
 				"risk_level", "high",
-				"response_path", "sanitize-and-forward-with-header",
-				"decision_rationale", fmt.Sprintf("Score %.2f in 0.6-0.79 range - sanitize and forward with risk header", assessment.CurrentThreatScore),
+				"response_path", "sanitize-and-forward",
+				"decision_rationale", fmt.Sprintf("Score %.2f in high band - sanitize and forward", assessment.CurrentThreatScore),
 				"patterns", assessment.AttackPatterns)
 
 			// Apply maximum sanitization to params
 			maxSanitized := p.sanitizer.SanitizeContent(string(paramsJSON)) // Maximum aggressiveness is default
+
+			// N5/B2 (bundle 3, keep-the-block): the sanitizer already
+			// verdicted the RAW params above. If it blocks, the block
+			// stands in the high band too — do not rewrite or forward.
+			if maxSanitized.Blocked {
+				p.logger.Warn("SECURITY: high-band request blocked by sanitizer verdict",
+					"session_id", sessionID,
+					"user_id", userID,
+					"threat_score", assessment.CurrentThreatScore,
+					"risk_level", "high",
+					"response_path", "blocked-by-sanitizer-verdict",
+					"decision_rationale", "Sanitizer verdict Blocked on raw params - block kept in high band (N5/B2)",
+					"patterns", assessment.AttackPatterns)
+				c.JSON(http.StatusForbidden, MCPResponse{
+					Error: &MCPError{
+						Code:    -32000,
+						Message: "Request blocked by threat detection",
+						Data:    "Sanitizer verdict: blocked (high band)",
+					},
+					ID: req.ID,
+				})
+				return
+			}
+
 			if maxSanitized.Sanitized != string(paramsJSON) {
 				var sanitizedParams interface{}
 				if err := json.Unmarshal([]byte(maxSanitized.Sanitized), &sanitizedParams); err == nil {
 					req.Params = sanitizedParams
 				}
 			}
-
-			// Set X-Aegir-Risk header for downstream awareness
-			c.Header("X-Aegir-Risk", "high")
-			c.Header("X-Aegir-Threat-Score", fmt.Sprintf("%.2f", assessment.CurrentThreatScore))
 		}
 	}
 
@@ -2324,24 +2351,128 @@ func (p *MCPProxy) getUserID(c *gin.Context) string {
 	return "anonymous"
 }
 
+// sidRotationIdentity tracks distinct client-influenced session IDs seen
+// from one non-client-controlled identity (userID_clientIP) within a
+// rolling window (F4b, bundle 3).
+type sidRotationIdentity struct {
+	ids       map[string]time.Time // sanitized session ID -> first-seen
+	count     int
+	degraded  bool
+	lastWarn  time.Time
+	firstSeen time.Time
+}
+
+// Session-creation rotation limits (F4b). A legitimate client creates ~1
+// session ID per conversation; sustained rotation of client IDs is the
+// F4(b) evasion vector.
+const (
+	sidRotationLimit  = 20
+	sidRotationWindow = 5 * time.Minute
+)
+
+// ensureSIDRotationState lazily initializes the tracker map (safe for
+// struct-literal construction in tests).
+func (p *MCPProxy) ensureSIDRotationState() {
+	if p.sidRotationState == nil {
+		p.sidRotationState = make(map[string]*sidRotationIdentity)
+	}
+}
+
+// sessionIDFromFallback is the non-client-controlled identity: the
+// userID_clientIP key, shared by all of an identity's degraded traffic.
+func (p *MCPProxy) sessionIDFromFallback(c *gin.Context) string {
+	return fmt.Sprintf("%s_%s", p.getUserID(c), c.ClientIP())
+}
+
+// sidRotationHonor reports whether a client-influenced session ID (from the
+// X-Session-ID header or the gin context) should be honored for this
+// request. Distinct IDs beyond sidRotationLimit within the rolling
+// sidRotationWindow stop being honored: the caller falls back to the shared
+// userID_ip key, where session accumulation re-engages. This is a degrade,
+// never a block — requests are always still served. The warn is rate-limited
+// to one per identity per minute to avoid log flooding.
+func (p *MCPProxy) sidRotationHonor(c *gin.Context, sid, sharedKey string) bool {
+	p.sidRotationMu.Lock()
+	defer p.sidRotationMu.Unlock()
+	p.ensureSIDRotationState()
+
+	now := time.Now()
+	id := p.sidRotationState[sharedKey]
+	if id == nil {
+		id = &sidRotationIdentity{ids: make(map[string]time.Time), firstSeen: now}
+		p.sidRotationState[sharedKey] = id
+	}
+
+	// Amortized sweep of identities idle well past the window.
+	if len(p.sidRotationState) > 64 {
+		for k, v := range p.sidRotationState {
+			if now.Sub(v.firstSeen) > 2*sidRotationWindow {
+				delete(p.sidRotationState, k)
+			}
+		}
+	}
+
+	// Expire individual IDs outside the window and reset the counter.
+	for s, t := range id.ids {
+		if now.Sub(t) > sidRotationWindow {
+			delete(id.ids, s)
+			id.count--
+		}
+	}
+	if id.count == 0 {
+		id.degraded = false
+		id.firstSeen = now
+	}
+
+	if id.degraded {
+		return false
+	}
+	if _, seen := id.ids[sid]; !seen {
+		id.ids[sid] = now
+		id.count++
+		id.firstSeen = now
+		if id.count > sidRotationLimit {
+			id.degraded = true
+			if now.Sub(id.lastWarn) >= time.Minute {
+				id.lastWarn = now
+				p.logger.Warn("SECURITY: session ID rotation degraded to shared identity key",
+					"identity", sharedKey,
+					"distinct_session_ids", id.count,
+					"window_seconds", int(sidRotationWindow.Seconds()),
+					"action", "degrade_to_shared_key")
+			}
+			return false
+		}
+	}
+	return true
+}
+
 // getSessionID extracts or generates a session ID from context.
 // It honours the client-supplied X-Session-ID header when present so that
 // multi-turn / SPIKEE replay sessions are isolated per-session rather than
 // collapsing all traffic from the same user/IP into one SessionContext.
 // The header value is treated as an opaque identifier and sanitized.
 func (p *MCPProxy) getSessionID(c *gin.Context) string {
+	// F4b (bundle 3): client-influenced session IDs are rate-limited per
+	// non-client-controlled identity. Beyond the rotation limit the
+	// identity degrades to the shared key below; this never blocks.
+	sharedKey := p.sessionIDFromFallback(c)
 	if sessionID, exists := c.Get("session_id"); exists {
 		if sid, ok := sessionID.(string); ok && sid != "" {
-			return sid
+			if p.sidRotationHonor(c, sid, sharedKey) {
+				return sid
+			}
+			return sharedKey
 		}
 	}
 	if headerSID := c.GetHeader("X-Session-ID"); headerSID != "" {
-		return sanitizeSessionID(headerSID)
+		sid := sanitizeSessionID(headerSID)
+		if p.sidRotationHonor(c, sid, sharedKey) {
+			return sid
+		}
+		return sharedKey
 	}
-	// Generate a session ID from user ID and client IP if not found
-	userID := p.getUserID(c)
-	clientIP := c.ClientIP()
-	return fmt.Sprintf("%s_%s", userID, clientIP)
+	return sharedKey
 }
 
 // sanitizeSessionID clamps a client-supplied session identifier to a safe

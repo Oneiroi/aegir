@@ -691,12 +691,60 @@ func (cta *ConversationalThreatAnalyzer) calculateOverallThreat(session *Session
 		baseScore += 0.15 // Multiple attack vectors
 	}
 
+	// F4(e) fragment accumulation (bundle 3): sub-threshold fragments from
+	// earlier in-window turns accumulate instead of evaporating. Bounded at
+	// fragmentCap, requires >=2 distinct fragment messages, and re-derived
+	// per request from in-window history only — the window expiry preserves
+	// the observed self-heal.
+	baseScore += fragmentAccumulation(session)
+
 	// Cap at 1.0
 	if baseScore > 1.0 {
 		baseScore = 1.0
 	}
 
 	return baseScore
+}
+
+// fragmentWindow is the age bound for the fragment term: messages older
+// than this stop accumulating (self-heal via window expiry, matching the
+// observed ~5-min recovery).
+const fragmentWindow = 5 * time.Minute
+
+// fragmentCap bounds the total fragment contribution so fragments alone
+// cannot cross the critical band.
+const fragmentCap = 0.3
+
+// fragmentAccumulation sums the per-message scores of in-window history
+// entries (excluding the current message, which already feeds
+// assessment.CurrentThreatScore) and returns the bounded fragment term:
+// 0 unless at least fragmentMinMessages distinct fragment messages exist.
+func fragmentAccumulation(session *SessionContext) float64 {
+	const fragmentMinMessages = 2
+	if len(session.History) < 2 {
+		return 0
+	}
+	now := time.Now()
+	fragCount := 0
+	total := 0.0
+	for i := range session.History {
+		msg := &session.History[i]
+		if i == len(session.History)-1 {
+			continue // current message: already counted in the base score
+		}
+		if msg.ThreatScore <= 0 || now.Sub(msg.Timestamp) > fragmentWindow {
+			continue
+		}
+		fragCount++
+		total += msg.ThreatScore
+	}
+	if fragCount < fragmentMinMessages {
+		return 0
+	}
+	if total > fragmentCap {
+		total = fragmentCap
+	}
+	return total
 }
 
 // determineRecommendedAction sets the recommended response
@@ -723,6 +771,31 @@ func (cta *ConversationalThreatAnalyzer) determineRecommendedAction(assessment *
 	}
 }
 
+// threatPattern is one per-message fragment indicator: a pre-compiled
+// pattern plus its score.
+type threatPattern struct {
+	re    *regexp.Regexp
+	score float64
+}
+
+// threatPatternScores are the per-message fragment indicators, pre-compiled
+// at package init (bundle 3: no per-call regexp compilation). Scored per
+// message in analyzeMessageContent and accumulated as the bounded fragment
+// term in calculateOverallThreat.
+var threatPatternScores = map[string]threatPattern{}
+
+func init() {
+	for pattern, score := range map[string]float64{
+		"ignore.*(previous|above|instruction)":  0.3,
+		"you.*(are|must|will).*(now|admin|dev)": 0.4,
+		"bypass|override|disable":               0.3,
+		"jailbreak|dan|unrestricted":            0.5,
+		"system.*(override|mode|access)":        0.4,
+	} {
+		threatPatternScores[pattern] = threatPattern{re: regexp.MustCompile(pattern), score: score}
+	}
+}
+
 // analyzeMessageContent analyzes individual message content
 func (cta *ConversationalThreatAnalyzer) analyzeMessageContent(content string) MessageContext {
 	ctx := MessageContext{
@@ -732,19 +805,11 @@ func (cta *ConversationalThreatAnalyzer) analyzeMessageContent(content string) M
 		Detections:  []string{},
 	}
 
-	// Basic threat indicators
-	threatPatterns := map[string]float64{
-		"ignore.*(previous|above|instruction)":  0.3,
-		"you.*(are|must|will).*(now|admin|dev)": 0.4,
-		"bypass|override|disable":               0.3,
-		"jailbreak|dan|unrestricted":            0.5,
-		"system.*(override|mode|access)":        0.4,
-	}
-
+	// Basic threat indicators (pre-compiled, bundle 3)
 	content_lower := strings.ToLower(content)
-	for pattern, score := range threatPatterns {
-		if matched, _ := regexp.MatchString(pattern, content_lower); matched {
-			ctx.ThreatScore += score
+	for pattern, tp := range threatPatternScores {
+		if tp.re.MatchString(content_lower) {
+			ctx.ThreatScore += tp.score
 			ctx.Detections = append(ctx.Detections, pattern)
 		}
 	}

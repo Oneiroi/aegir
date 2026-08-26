@@ -648,7 +648,7 @@ func TestTwoTierThreatResponseRealHTTP(t *testing.T) {
 		t.Logf("Critical HTTP test: status=%d body=%+v", resp.StatusCode, result)
 	})
 
-	t.Run("Real HTTP: High-risk request sets X-Aegir-Risk header", func(t *testing.T) {
+	t.Run("Real HTTP: High-risk request sends no score headers (B1)", func(t *testing.T) {
 		ts := httptest.NewServer(makeRouter(highMock))
 		defer ts.Close()
 
@@ -666,16 +666,17 @@ func TestTwoTierThreatResponseRealHTTP(t *testing.T) {
 		if resp.StatusCode == http.StatusForbidden {
 			t.Errorf("High risk must not return 403 (got %d)", resp.StatusCode)
 		}
+		// B1 (bundle 3): score headers are stripped on egress — the score
+		// stays in the HMAC log only.
 		riskHeader := resp.Header.Get("X-Aegir-Risk")
-		if riskHeader != "high" {
-			t.Errorf("Expected X-Aegir-Risk: high, got %q", riskHeader)
+		if riskHeader != "" {
+			t.Errorf("X-Aegir-Risk header must be absent (B1), got %q", riskHeader)
 		}
 		scoreHeader := resp.Header.Get("X-Aegir-Threat-Score")
-		if scoreHeader != "0.72" {
-			t.Errorf("Expected X-Aegir-Threat-Score: 0.72, got %q", scoreHeader)
+		if scoreHeader != "" {
+			t.Errorf("X-Aegir-Threat-Score header must be absent (B1), got %q", scoreHeader)
 		}
-		t.Logf("High-risk HTTP test: status=%d X-Aegir-Risk=%s X-Aegir-Threat-Score=%s",
-			resp.StatusCode, riskHeader, scoreHeader)
+		t.Logf("High-risk HTTP test: status=%d", resp.StatusCode)
 	})
 }
 

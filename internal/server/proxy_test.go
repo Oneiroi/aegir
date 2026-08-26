@@ -63,9 +63,9 @@ func setupMCPProxyWithSessionAnalyzer(sessionRisk string) *MCPProxy {
 	defaultCfg := &config.Config{
 		Security: config.Security{
 			AnomalyDetection: config.AnomalyDetection{
-				Enabled:         false,
-				BlockThreshold:  0.95,
-				LogThreshold:    0.60,
+				Enabled:        false,
+				BlockThreshold: 0.95,
+				LogThreshold:   0.60,
 			},
 		},
 	}
@@ -108,7 +108,7 @@ func TestTwoTierThreatResponse(t *testing.T) {
 		t.Logf("Critical risk test passed - Response: %s", w.Body.String())
 	})
 
-	t.Run("High Risk - Request Forwarded with X-Aegir-Risk Header", func(t *testing.T) {
+	t.Run("High Risk - Request Forwarded Without Score Headers", func(t *testing.T) {
 		proxy := setupMCPProxyWithSessionAnalyzer("high")
 		mcpRequest := MCPRequest{Method: "tools/call", Params: map[string]interface{}{"name": "security_scan"}, ID: 2}
 		mcpRequestJSON, _ := json.Marshal(mcpRequest)
@@ -124,13 +124,15 @@ func TestTwoTierThreatResponse(t *testing.T) {
 		if w.Code == http.StatusForbidden {
 			t.Errorf("High risk request must not be blocked with 403 (got 403)")
 		}
-		if w.Header().Get("X-Aegir-Risk") != "high" {
-			t.Errorf("Expected X-Aegir-Risk header to be 'high', got: %s", w.Header().Get("X-Aegir-Risk"))
+		// B1 (bundle 3): score headers are stripped on egress — the score
+		// stays in the HMAC log only.
+		if w.Header().Get("X-Aegir-Risk") != "" {
+			t.Errorf("X-Aegir-Risk header must be absent (B1), got: %s", w.Header().Get("X-Aegir-Risk"))
 		}
-		if w.Header().Get("X-Aegir-Threat-Score") != "0.72" {
-			t.Errorf("Expected X-Aegir-Threat-Score header to be '0.72', got: %s", w.Header().Get("X-Aegir-Threat-Score"))
+		if w.Header().Get("X-Aegir-Threat-Score") != "" {
+			t.Errorf("X-Aegir-Threat-Score header must be absent (B1), got: %s", w.Header().Get("X-Aegir-Threat-Score"))
 		}
-		t.Logf("High risk test passed - Status: %d, X-Aegir-Risk: %s", w.Code, w.Header().Get("X-Aegir-Risk"))
+		t.Logf("High risk test passed - Status: %d", w.Code)
 	})
 
 	t.Run("Low Risk - Normal Processing", func(t *testing.T) {
@@ -164,9 +166,9 @@ func newMockProxy(mock *MockSessionAnalyzer) *MCPProxy {
 	defaultCfg := &config.Config{
 		Security: config.Security{
 			AnomalyDetection: config.AnomalyDetection{
-				Enabled:         false,
-				BlockThreshold:  0.95,
-				LogThreshold:    0.60,
+				Enabled:        false,
+				BlockThreshold: 0.95,
+				LogThreshold:   0.60,
 			},
 		},
 	}
@@ -204,10 +206,11 @@ func TestTwoTierThreatResponseBoundaryCases(t *testing.T) {
 		if w.Code == http.StatusForbidden {
 			t.Errorf("Score 0.79 should be forwarded (high), not blocked with 403")
 		}
-		if w.Header().Get("X-Aegir-Risk") != "high" {
-			t.Errorf("Expected X-Aegir-Risk: high, got %q", w.Header().Get("X-Aegir-Risk"))
+		// B1 (bundle 3): score headers are stripped on egress.
+		if w.Header().Get("X-Aegir-Risk") != "" {
+			t.Errorf("X-Aegir-Risk header must be absent (B1), got %q", w.Header().Get("X-Aegir-Risk"))
 		}
-		t.Logf("Boundary test (0.79 exactly) passed - High threshold enforced, X-Aegir-Risk: %s", w.Header().Get("X-Aegir-Risk"))
+		t.Logf("Boundary test (0.79 exactly) passed - High threshold enforced")
 	})
 
 	t.Run("Boundary: Score 0.6 (High)", func(t *testing.T) {
@@ -218,10 +221,11 @@ func TestTwoTierThreatResponseBoundaryCases(t *testing.T) {
 		if w.Code == http.StatusForbidden {
 			t.Errorf("Score 0.6 should be forwarded (minimum high), not blocked with 403")
 		}
-		if w.Header().Get("X-Aegir-Risk") != "high" {
-			t.Errorf("Expected X-Aegir-Risk: high, got %q", w.Header().Get("X-Aegir-Risk"))
+		// B1 (bundle 3): score headers are stripped on egress.
+		if w.Header().Get("X-Aegir-Risk") != "" {
+			t.Errorf("X-Aegir-Risk header must be absent (B1), got %q", w.Header().Get("X-Aegir-Risk"))
 		}
-		t.Logf("Boundary test (0.6 minimum high) passed, X-Aegir-Risk: %s", w.Header().Get("X-Aegir-Risk"))
+		t.Logf("Boundary test (0.6 minimum high) passed")
 	})
 }
 
@@ -247,10 +251,11 @@ func TestTwoTierThreatResponseWithMockAnalyzer(t *testing.T) {
 		if w.Code == http.StatusForbidden {
 			t.Errorf("High risk must not be blocked with 403, got %d", w.Code)
 		}
-		if w.Header().Get("X-Aegir-Risk") != "high" {
-			t.Errorf("Expected X-Aegir-Risk: high, got %q", w.Header().Get("X-Aegir-Risk"))
+		// B1 (bundle 3): score headers are stripped on egress.
+		if w.Header().Get("X-Aegir-Risk") != "" {
+			t.Errorf("X-Aegir-Risk header must be absent (B1), got %q", w.Header().Get("X-Aegir-Risk"))
 		}
-		t.Logf("Mock analyzer high path test passed, X-Aegir-Risk: %s", w.Header().Get("X-Aegir-Risk"))
+		t.Logf("Mock analyzer high path test passed")
 	})
 }
 
@@ -273,10 +278,11 @@ func TestTwoTierThreatResponseLogging(t *testing.T) {
 		body, _ := json.Marshal(MCPRequest{Method: "tools/call", ID: 10})
 		w, c := makeTestContext("POST", body)
 		proxy.HandleMCPRequest(c)
-		if w.Header().Get("X-Aegir-Risk") != "high" {
-			t.Errorf("Expected X-Aegir-Risk: high header, got: %q", w.Header().Get("X-Aegir-Risk"))
+		// B1 (bundle 3): score headers are stripped on egress.
+		if w.Header().Get("X-Aegir-Risk") != "" {
+			t.Errorf("X-Aegir-Risk header must be absent (B1), got: %q", w.Header().Get("X-Aegir-Risk"))
 		}
-		t.Logf("High risk logging test - Request forwarded with risk header")
+		t.Logf("High risk logging test - Request forwarded without score headers")
 	})
 }
 
@@ -293,9 +299,9 @@ func TestTwoTierThreatResponseEdgeCases(t *testing.T) {
 		defaultCfg := &config.Config{
 			Security: config.Security{
 				AnomalyDetection: config.AnomalyDetection{
-					Enabled:         false,
-					BlockThreshold:  0.95,
-					LogThreshold:    0.60,
+					Enabled:        false,
+					BlockThreshold: 0.95,
+					LogThreshold:   0.60,
 				},
 			},
 		}
