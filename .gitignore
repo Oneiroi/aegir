@@ -11,6 +11,12 @@ reference/*
 # Internal working scratch — durable record lives in ISA.md
 Plans/
 
+# Red-team harness and any sibling llm-redteam checkout that ends up copied
+# or symlinked into the tree — attack corpora, payload catalogs, and results
+# must never land in a commit, on any branch, tracked or local-exclude alone.
+redteam/
+llm-redteam/
+
 __pycache__/
 *.pyc
 

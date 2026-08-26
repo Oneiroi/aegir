@@ -1,11 +1,19 @@
 package upstream
 
 import (
+	"bytes"
+	"os"
+	"path/filepath"
+
 	"context"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aegishjalmur/aegir/internal/config"
+	"github.com/aegishjalmur/aegir/internal/logging"
 )
 
 // TestSecureDialContext_BlocksLoopbackIP verifies that a direct dial to the
@@ -170,5 +178,198 @@ func TestIsRestrictedIP_Categories(t *testing.T) {
 				t.Fatalf("%s (%s) should be restricted but was allowed", c.name, c.ip)
 			}
 		})
+	}
+}
+
+// testUpstreamLogger builds a logger suitable for upstream unit tests.
+func testUpstreamLogger(t *testing.T) *logging.Logger {
+	t.Helper()
+	logger, err := logging.New(config.Logging{
+		Level:   "error",
+		Format:  "json",
+		HMACKey: "00000000000000000000000000000000", // 32-char placeholder for tests
+	})
+	if err != nil {
+		t.Fatalf("failed to create logger: %v", err)
+	}
+	return logger
+}
+
+// TestManagerSecureDial_AllowlistedLoopbackUpstream verifies F1: an
+// operator-configured upstream whose authority is a loopback address is
+// exempted from the restricted-IP dial guard and dials successfully.
+func TestManagerSecureDial_AllowlistedLoopbackUpstream(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen on loopback: %v", err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	cfg := &config.Upstream{
+		Services: []config.UpstreamService{
+			{Name: "local", URL: fmt.Sprintf("http://127.0.0.1:%d", port), Enabled: true},
+		},
+	}
+	m := NewManager(cfg, testUpstreamLogger(t))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	conn, err := m.secureDialContext(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatalf("expected allowlisted loopback upstream dial to succeed, got %v", err)
+	}
+	conn.Close()
+}
+
+// TestManagerSecureDial_NonAllowlistedLoopbackBlocked verifies that the
+// exemption is identity-based (exact host:port): the same loopback IP on a
+// different, non-configured port is still blocked.
+func TestManagerSecureDial_NonAllowlistedLoopbackBlocked(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen on loopback: %v", err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	cfg := &config.Upstream{
+		Services: []config.UpstreamService{
+			{Name: "local", URL: fmt.Sprintf("http://127.0.0.1:%d", port), Enabled: true},
+		},
+	}
+	m := NewManager(cfg, testUpstreamLogger(t))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err = m.secureDialContext(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", port+1))
+	if err == nil {
+		t.Fatalf("expected SSRF error for non-allowlisted 127.0.0.1:%d, got nil", port+1)
+	}
+	if !strings.Contains(err.Error(), "SSRF") {
+		t.Fatalf("expected error to contain \"SSRF\", got %q", err.Error())
+	}
+}
+
+// TestManagerSecureDial_AllowlistedLocalhostHostname verifies F1 for the
+// hostname form: a configured http://localhost:<port> upstream dials
+// successfully even though "localhost" is normally rejected at the dial layer.
+func TestManagerSecureDial_AllowlistedLocalhostHostname(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen on loopback: %v", err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	cfg := &config.Upstream{
+		Services: []config.UpstreamService{
+			{Name: "local", URL: fmt.Sprintf("http://localhost:%d", port), Enabled: true},
+		},
+	}
+	m := NewManager(cfg, testUpstreamLogger(t))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	conn, err := m.secureDialContext(ctx, "tcp", fmt.Sprintf("localhost:%d", port))
+	if err != nil {
+		t.Fatalf("expected allowlisted localhost upstream dial to succeed, got %v", err)
+	}
+	conn.Close()
+}
+
+// TestManagerSecureDial_NonAllowlistedLocalhostBlocked verifies that
+// "localhost" remains blocked when it is not a configured upstream authority.
+func TestManagerSecureDial_NonAllowlistedLocalhostBlocked(t *testing.T) {
+	m := NewManager(&config.Upstream{}, testUpstreamLogger(t))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err := m.secureDialContext(ctx, "tcp", "localhost:8080")
+	if err == nil {
+		t.Fatalf("expected SSRF error for non-allowlisted localhost, got nil")
+	}
+	if !strings.Contains(err.Error(), "SSRF") {
+		t.Fatalf("expected error to contain \"SSRF\", got %q", err.Error())
+	}
+}
+
+// TestHasConfiguredServices verifies the standalone-vs-upstream-mode signal
+// the proxy uses for honest failure handling (F1).
+func TestHasConfiguredServices(t *testing.T) {
+	empty := NewManager(&config.Upstream{}, testUpstreamLogger(t))
+	if empty.HasConfiguredServices() {
+		t.Fatal("empty manager should report no configured services")
+	}
+
+	disabled := NewManager(&config.Upstream{
+		Services: []config.UpstreamService{
+			{Name: "off", URL: "http://127.0.0.1:9999", Enabled: false},
+		},
+	}, testUpstreamLogger(t))
+	if disabled.HasConfiguredServices() {
+		t.Fatal("manager with only disabled services should report no configured services")
+	}
+
+	withSvc := NewManager(&config.Upstream{
+		Services: []config.UpstreamService{
+			{Name: "on", URL: "http://127.0.0.1:9999", Enabled: true},
+		},
+	}, testUpstreamLogger(t))
+	if !withSvc.HasConfiguredServices() {
+		t.Fatal("manager with an enabled service should report configured services")
+	}
+}
+
+// TestManagerSecureDial_TrustedDialAuditLog verifies G1: an allowlisted
+// (trusted-authority) dial emits an "upstream_trusted_dial" Info entry
+// carrying the configured authority and the resolved IP:port — the
+// DNS-rebinding forensics record.
+func TestManagerSecureDial_TrustedDialAuditLog(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen on loopback: %v", err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	logFile := filepath.Join(t.TempDir(), "audit.log")
+	logger, err := logging.New(config.Logging{
+		Level:   "info",
+		Format:  "json",
+		File:    logFile,
+		HMACKey: "00000000000000000000000000000000", // 32-char placeholder for tests
+	})
+	if err != nil {
+		t.Fatalf("failed to create logger: %v", err)
+	}
+	defer logger.Close()
+
+	cfg := &config.Upstream{
+		Services: []config.UpstreamService{
+			{Name: "local", URL: fmt.Sprintf("http://127.0.0.1:%d", port), Enabled: true},
+		},
+	}
+	m := NewManager(cfg, logger)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	conn, err := m.secureDialContext(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatalf("expected allowlisted loopback upstream dial to succeed, got %v", err)
+	}
+	conn.Close()
+
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("failed to read log file: %v", err)
+	}
+	if !bytes.Contains(data, []byte("upstream_trusted_dial")) {
+		t.Fatalf("expected upstream_trusted_dial audit entry, log:\n%s", data)
 	}
 }

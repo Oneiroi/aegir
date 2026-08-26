@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -593,6 +594,38 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 	}
 	// --- END Judge Proxy Wiring ---
 
+	// tools/call pre-forward gates (F2/N1): the SSRF tool-argument scan and the
+	// human-approval gate previously ran only in the local fallback handler,
+	// leaving the HTTP forward path uncovered. Run both before ForwardRequest.
+	if req.Method == "tools/call" {
+		if params, ok := req.Params.(map[string]interface{}); ok {
+			args, _ := params["arguments"].(map[string]interface{})
+
+			// F2: walk the ENTIRE arguments tree (maps/slices/strings at any
+			// depth) and reject any string value that is an SSRF target.
+			if target, found := findSSRFTargetInArgs(params["arguments"]); found {
+				// AEGIR-L-003: log the offending URL server-side; do not echo
+				// it back to the client.
+				p.logger.Warn("SSRF target blocked in tool arguments", "url", target)
+				c.JSON(http.StatusForbidden, MCPResponse{
+					Error: &MCPError{
+						Code:    -32000,
+						Message: "Request blocked: SSRF target detected in tool arguments",
+					},
+					ID: req.ID,
+				})
+				return
+			}
+
+			// N1/F8: human-approval gate on the forward path (fail closed).
+			toolName, _ := params["name"].(string)
+			if mcpErr := p.checkHumanApproval(toolName, args); mcpErr != nil {
+				c.JSON(http.StatusForbidden, MCPResponse{Error: mcpErr, ID: req.ID})
+				return
+			}
+		}
+	}
+
 	// Forward the sanitized request to upstream services
 	upstreamReq := &upstream.MCPRequest{
 		Method: req.Method,
@@ -640,8 +673,20 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 	upstreamResp, err := p.upstreamManager.ForwardRequest(forwardCtx, upstreamReq)
 	if err != nil {
 		p.logger.Error("Failed to forward request to upstream", "error", err)
-		// Fall back to local handling — firewall exposes built-in security tools
-		// for all standard MCP methods when no upstream is reachable.
+		if p.upstreamManager.HasConfiguredServices() {
+			// Upstreams are configured but unreachable/failing: fail closed
+			// with an honest error instead of fabricating a local success (F1).
+			c.JSON(http.StatusBadGateway, MCPResponse{
+				Error: &MCPError{
+					Code:    -32000,
+					Message: "upstream unavailable",
+				},
+				ID: req.ID,
+			})
+			return
+		}
+		// No upstreams configured (standalone firewall mode) — firewall exposes
+		// built-in security tools for all standard MCP methods locally.
 		response := p.processMCPMethod(c.Request.Context(), &req)
 		c.JSON(http.StatusOK, response)
 		return
@@ -1396,28 +1441,8 @@ func (p *MCPProxy) handleToolsCall(_ context.Context, req *MCPRequest) *MCPRespo
 
 	// Human approval gate (ISC-119): hold destructive tool calls for external approval.
 	toolName, _ := params["name"].(string)
-	if p.config != nil && p.config.Security.HumanApproval.Enabled && toolName != "" {
-		ha := p.config.Security.HumanApproval
-		if isDestructiveTool(toolName, ha.Patterns) {
-			if err := p.requestHumanApproval(toolName, args, ha); err != nil {
-				p.logger.Warn("Human approval gate: blocked destructive tool call",
-					"tool", toolName, "reason", err.Error())
-				p.logger.LogSecurityEvent(&logging.SecurityEvent{
-					Type:      "human_approval_timeout",
-					Severity:  "high",
-					Message:   "Destructive tool call blocked: human approval not received",
-					Timestamp: time.Now(),
-					Details:   map[string]string{"tool": toolName, "reason": err.Error()},
-				})
-				return &MCPResponse{
-					Error: &MCPError{
-						Code:    -32000,
-						Message: "Request blocked: human approval required for destructive operation",
-					},
-					ID: req.ID,
-				}
-			}
-		}
+	if mcpErr := p.checkHumanApproval(toolName, args); mcpErr != nil {
+		return &MCPResponse{Error: mcpErr, ID: req.ID}
 	}
 
 	contentArg := ""
@@ -1507,6 +1532,62 @@ func isDestructiveTool(name string, patterns []string) bool {
 	return false
 }
 
+// checkHumanApproval applies the ISC-119 human-approval gate to a tools/call.
+// Shared by the HTTP forward path (HandleMCPRequest) and the local fallback
+// path (handleToolsCall) so both enforce identical policy. Returns a non-nil
+// MCPError when the call must be blocked — fail closed: enabled with no
+// reachable or approving webhook blocks the call.
+func (p *MCPProxy) checkHumanApproval(toolName string, args map[string]interface{}) *MCPError {
+	if p.config == nil || !p.config.Security.HumanApproval.Enabled || toolName == "" {
+		return nil
+	}
+	ha := p.config.Security.HumanApproval
+	if !isDestructiveTool(toolName, ha.Patterns) {
+		return nil
+	}
+	if err := p.requestHumanApproval(toolName, args, ha); err != nil {
+		p.logger.Warn("Human approval gate: blocked destructive tool call",
+			"tool", toolName, "reason", err.Error())
+		p.logger.LogSecurityEvent(&logging.SecurityEvent{
+			Type:      "human_approval_timeout",
+			Severity:  "high",
+			Message:   "Destructive tool call blocked: human approval not received",
+			Timestamp: time.Now(),
+			Details:   map[string]string{"tool": toolName, "reason": err.Error()},
+		})
+		return &MCPError{
+			Code:    -32000,
+			Message: "Request blocked: human approval required for destructive operation",
+		}
+	}
+	return nil
+}
+
+// findSSRFTargetInArgs recursively walks a decoded-JSON arguments tree (maps,
+// slices, strings at any depth) and returns the first string value that
+// isSSRFTarget flags as an SSRF target (F2).
+func findSSRFTargetInArgs(v interface{}) (string, bool) {
+	switch val := v.(type) {
+	case string:
+		if isSSRFTarget(val) {
+			return val, true
+		}
+	case map[string]interface{}:
+		for _, sub := range val {
+			if target, found := findSSRFTargetInArgs(sub); found {
+				return target, true
+			}
+		}
+	case []interface{}:
+		for _, sub := range val {
+			if target, found := findSSRFTargetInArgs(sub); found {
+				return target, true
+			}
+		}
+	}
+	return "", false
+}
+
 // requestHumanApproval POSTs the tool name and args to the configured webhook
 // and waits up to Timeout for {"approved":true}. Returns an error if the call
 // should be blocked (timeout, HTTP error, or explicit rejection).
@@ -1566,8 +1647,9 @@ func isSSRFTarget(s string) bool {
 	u, err := url.Parse(raw)
 	if err != nil {
 		// If we can't parse it, assume it might be a native IP notation like
-		// 0x7F000001 (hex) or 0177.0000.0000.0001 (octal). Check the raw string.
-		return isSSRFUnsafeRaw(raw)
+		// 0x7F000001 (hex) or 0177.0000.0000.0001 (octal). Check the raw
+		// string, including embedded dialable literals (A4-1/A4-4).
+		return ssrfProseScan(raw)
 	}
 
 	// Check scheme
@@ -1577,9 +1659,21 @@ func isSSRFTarget(s string) bool {
 		return true
 	}
 
+	// A4-1/A4-4: a non-dialable scheme (or none) may still embed a
+	// dialable URL literal or a restricted bracket literal in prose.
+	if scheme != "http" && scheme != "https" {
+		return ssrfProseScan(raw)
+	}
+
 	host := u.Hostname()
 	if host == "" {
-		return false
+		// A4-2: an empty authority on a dialable scheme ("http:///foo")
+		// is ambiguous at parse time; fail closed. Non-dialable schemes
+		// (mailto:, data:, ...) fall through to the prose scan instead.
+		if scheme == "http" || scheme == "https" {
+			return true
+		}
+		return ssrfProseScan(raw)
 	}
 
 	// Check for localhost/localdomain
@@ -1587,17 +1681,22 @@ func isSSRFTarget(s string) bool {
 		return true
 	}
 
-	// Check for IPv6 loopback forms
-	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
-		ipStr := host[1 : len(host)-1]
-		if isIPv6Loopback(ipStr) {
+	// IPv6 loopback forms. u.Hostname() strips the brackets, so the
+	// pre-bundle-2 bracket branch is gone (it was dead — brackets never
+	// survive Hostname()); the bare form is judged here, and zone
+	// handling below makes "fe80::1%25eth0" reachable too (A4-5).
+	if isIPv6Loopback(host) {
+		return true
+	}
+
+	// A4-5: u.Hostname() strips brackets but keeps a (possibly
+	// percent-encoded) IPv6 zone ("[fe80::1%25eth0]" →
+	// "fe80::1%25eth0"); unescape and drop the zone before judging.
+	if unhost := stripIPZone(host); unhost != host {
+		host = unhost
+		if ip := net.ParseIP(host); ip != nil && isUnsafeIP(ip) {
 			return true
 		}
-		// Also check if it's an IPv4-mapped IPv6 like [::ffff:127.0.0.1]
-		if ip := net.ParseIP(ipStr); ip != nil && isUnsafeIP(ip) {
-			return true
-		}
-		return isIPv6Loopback(ipStr)
 	}
 
 	// Check for integer IP notation (e.g., 0x7F000001, 0177.0000.0000.0001)
@@ -1614,6 +1713,61 @@ func isSSRFTarget(s string) bool {
 	}
 
 	return isUnsafeIP(resolvedIP)
+}
+
+// ssrfProseURLPattern / ssrfProseBracketPattern extract dialable URL
+// literals and IPv6 bracket literals from prose (A4-1, A4-4). RE2:
+// bounded character classes, single-pass — no backtracking possible.
+var (
+	ssrfProseURLPattern     = regexp.MustCompile(`https?://[^\s"'<>[\]]+`)
+	ssrfProseBracketPattern = regexp.MustCompile(`\[[0-9A-Za-z:.%\-]+\]`)
+)
+
+// stripIPZone normalizes a percent-encoded IPv6 zone for pre-resolution
+// judging. The host from u.Hostname() may carry a zone in three forms:
+// a raw one ("fe80::1%eth0"), or one/two layers of %XX-encoding
+// ("fe80::1%25eth0" / "fe80::1%2525eth0"). For encoded forms the
+// zone is decoded exactly once (mirroring url.Parse's single decode —
+// double-decoding would also destroy an unescaped literal '%' that a
+// malformed but syntactically valid name could carry, widening false
+// positives), then the zone is cut at the remaining '%' — bounds-
+// checked, so a hex pair like %de that unescapes to a plain suffix
+// ("fe80::1%25de" → "fe80::1%de" → "fe80::1") cannot drive a slice
+// panic. Judgment-only: the original string is never modified or
+// dialed, so cutting a raw non-hex zone tail is conservative, and a
+// fully unparseable remainder just fails isUnsafeIP/resolveIP
+// downstream.
+func stripIPZone(host string) string {
+	h := host
+	if strings.Contains(h, "%25") {
+		if un, err := url.PathUnescape(h); err == nil {
+			h = un
+		}
+	}
+	if i := strings.IndexByte(h, '%'); i >= 0 {
+		return h[:i]
+	}
+	return h
+}
+
+// ssrfProseScan covers the scheme-garbled prose evasion class (A4-1,
+// A4-4): every embedded http(s) literal is re-judged, every bracket
+// literal through the shared restricted-host predicate
+// (upstream.IsRestrictedHost), then the raw string's final literal
+// scan. Recursion terminates: extracted literals always carry an
+// http/https scheme and take the non-prose path.
+func ssrfProseScan(s string) bool {
+	for _, c := range ssrfProseURLPattern.FindAllString(s, -1) {
+		if isSSRFTarget(c) {
+			return true
+		}
+	}
+	for _, lit := range ssrfProseBracketPattern.FindAllString(s, -1) {
+		if upstream.IsRestrictedHost(lit) {
+			return true
+		}
+	}
+	return isSSRFUnsafeRaw(s)
 }
 
 // isLocalHost returns true if host is a form of localhost

@@ -22,13 +22,15 @@ Aegir mitigates path 1 (SSRF) via parse-time tool-argument URL validation — no
 
 ---
 
+Upstream trust scope: operator-configured upstream authorities are trusted by identity — the configured "host:port" string match — and resolved IPs are not re-verified for configured upstreams. DNS rebinding of an operator-configured upstream name is therefore operator-DNS compromise and outside the gateway's threat scope; every trusted dial is recorded as an `upstream_trusted_dial` audit entry with the resolved address. A startup warning is logged when a configured upstream is in a restricted range, and an opt-in pinned-IP mode is planned as a follow-up.
+
 ## MITRE ATLAS coverage
 
 Aegir's detection is mapped against the MITRE ATLAS framework for ML attacks. Full gap analysis in [`MITRE-ATLAS-GAP-ANALYSIS.md`](MITRE-ATLAS-GAP-ANALYSIS.md).
 
 | Technique | Status | Mechanism |
 |---|---|---|
-| AML.T0051.000 — Direct Prompt Injection | implemented | 61 IOC patterns, Aho-Corasick trie, case/spacing/unicode normalisation |
+| AML.T0051.000 — Direct Prompt Injection | implemented | 69 IOC patterns, Aho-Corasick trie, case/spacing/unicode normalisation |
 | AML.T0051.001 — Indirect Prompt Injection | implemented | `scanToolResultForInjection()` applies full detection suite to tools/call result content before forwarding (M008, ISC-22) |
 | AML.T0053 — Agent Tool Invocation Abuse | implemented | `validateResourceURI()` on URL-typed tool arguments |
 | AML.T0054.001–.006 — Jailbreak variants | implemented | IOC patterns + anomaly scoring |
@@ -48,7 +50,7 @@ MCP Client → Aegir proxy → upstream MCP server
                 │
                 ├─ Auth gate (JWT / OAuth2 / API key / WebAuthn)
                 ├─ TLS 1.3 enforcement
-                ├─ Pattern detection (Aho-Corasick trie, 61 IOC patterns)
+                ├─ Pattern detection (Aho-Corasick trie, 69 IOC patterns)
                 ├─ Anomaly scoring (Shannon entropy, non-ASCII ratio)
                 ├─ Compliance redaction (GDPR/HIPAA/PCI)
                 ├─ HMAC-protected audit log
@@ -159,13 +161,13 @@ Full scope boundary with machine-readable coverage map: [`SCOPE.md`](SCOPE.md) a
 |---|---|---|
 | M006 | Activate dead IOC patterns; anomaly block threshold; response compliance scan | Shipped |
 | M007 | WebAuthn/FIDO2 MFA; per-identity rate limiting; model extraction detection | Shipped |
-| M008 | Leet-speak normalisation; base64 decode-then-scan; indirect injection (tool-result scan in progress) | Mostly shipped |
+| M008 | Leet-speak normalisation; base64 decode-then-scan; indirect injection (tool-result scan) | Shipped |
 | M009 | LLM judge layer — async hold-and-decide, Ollama local default | Shipped (sync judge + hold wired; MCP-native progress pending SSE transport) |
 | M012 | Aho-Corasick detection trie (stdlib, no new deps) | Shipped |
 | M013 | Judge backend portability — Ollama / OpenAI-compatible / Anthropic adapters + transport-error failover | Shipped |
 | M014 | Pre-OSS security audit remediation (1 CRITICAL + 4 HIGH + 5 MED + 5 LOW) | Shipped |
 | M015 | MCP 2026-07-28 spec hardening (13 ISCs: header validation, meta inspection, async quota, XSS hardening, signed state, PKCE) | Shipped |
-| M016 | LLMVault reference integration; defensive-architecture positioning (documentation + mapping guide) | **In progress** |
+| M016 | LLMVault reference integration; defensive-architecture positioning (documentation + mapping guide) | Shipped |
 
 ---
 

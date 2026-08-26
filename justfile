@@ -170,3 +170,57 @@ bench-file PAYLOADS='':
         --insecure \
         --judge-provider "${AEGIR_BENCH_JUDGE:-ollama}" \
         --payload-file "{{PAYLOADS}}"
+
+# Regenerate redteam/aegir/examples/replay-adversarial-example.{json,md} from
+# redteam/aegir/examples/play-example.jsonl. Self-contained: builds binaries if
+# needed, brings up its own Aegir (HTTP, judge disabled) + echo-server upstream
+# on scratch ports 18443/18080 so it never collides with `just run`/`just demo`,
+# logs in, harvests the frozen corpus, replays it, then tears both down.
+# See redteam/aegir/examples/README.md for what the chain means.
+generate-adversarial-example: build build-echo
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ROOT="$(pwd)"
+    RT="$ROOT/redteam/aegir"
+    LOGDIR="$ROOT/logs/generate-adversarial-example"
+    mkdir -p "$LOGDIR"
+    UPSTREAM_PORT=18080
+    AEGIR_PORT=18443
+    AEGIR_URL="http://127.0.0.1:${AEGIR_PORT}"
+
+    pkill -f "bin/echo-server -addr :${UPSTREAM_PORT}" 2>/dev/null || true
+    pkill -f "MCP_SERVER_PORT=${AEGIR_PORT}" 2>/dev/null || true
+
+    ./bin/echo-server -addr ":${UPSTREAM_PORT}" > "$LOGDIR/echo.log" 2>&1 &
+    ECHO_PID=$!
+    AEGIR_ALLOW_INSECURE_JWT_SECRET=true MCP_SERVER_TLS_ENABLED=false \
+      MCP_SECURITY_RATE_LIMIT_ENABLED=false MCP_SERVER_PORT=${AEGIR_PORT} \
+      MCP_UPSTREAM_URL="http://127.0.0.1:${UPSTREAM_PORT}" \
+      ./bin/aegir > "$LOGDIR/aegir.log" 2>&1 &
+    AEGIR_PID=$!
+
+    cleanup() { kill "$ECHO_PID" "$AEGIR_PID" 2>/dev/null || true; }
+    trap cleanup EXIT
+
+    echo "waiting for Aegir on ${AEGIR_URL}/health ..."
+    for i in $(seq 1 20); do
+        if curl -sf -o /dev/null --max-time 1 "${AEGIR_URL}/health"; then break; fi
+        if [[ $i -eq 20 ]]; then echo "ERROR: Aegir did not become healthy" >&2; cat "$LOGDIR/aegir.log" >&2; exit 1; fi
+        sleep 0.5
+    done
+
+    PASSWORD="$(grep -o 'Admin password (save this): .*' "$LOGDIR/aegir.log" | sed 's/.*: //')"
+    if [[ -z "$PASSWORD" ]]; then echo "ERROR: could not read admin password from $LOGDIR/aegir.log" >&2; exit 1; fi
+    TOKEN="$(curl -s -X POST "${AEGIR_URL}/auth/login" \
+        -H "Content-Type: application/json" \
+        -d "{\"username\":\"admin\",\"password\":\"${PASSWORD}\"}" \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')"
+
+    cd "$RT"
+    python3 harvest.py 'examples/play-example.jsonl' -o examples/corpus-example.jsonl
+    python3 replay.py examples/corpus-example.jsonl \
+        --base-url "${AEGIR_URL}" --api-key "${TOKEN}" \
+        --report examples/replay-adversarial-example.json \
+        --markdown examples/replay-adversarial-example.md
+
+    echo "wrote $RT/examples/replay-adversarial-example.{json,md}"

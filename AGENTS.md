@@ -1,71 +1,45 @@
 # Aegir — Agent Instructions
 
-Aegir is an MCP (Model Context Protocol) security gateway written in Go. This file is the
-shared source of truth for ALL coding agents working on this repo — Claude Code, local models
-served via OMLX, or any other harness. `CLAUDE.md` adds Claude-specific skill routing on top;
-everything load-bearing lives here.
+Aegir is MCP (Model Context Protocol) security gateway written in Go. Shared source of truth for ALL coding agents — Claude Code, local models via OMLX, any other harness. `CLAUDE.md` adds Claude-specific skill routing; load-bearing content lives here.
 
-The living spec is `ISA.md` (Ideal State Articulation). Read its frontmatter and Status
-Summary before starting work; update checkbox state and append Decisions/Verification
-entries as you go.
+Living spec is `ISA.md` (Ideal State Articulation). Read frontmatter + Status Summary before starting; update checkbox state, append Decisions/Verification entries as you go.
 
 ## Build verification gate — MANDATORY at session start
 
-Trust the build, not the docs. Before believing ANY "done"/"complete"/"committed" claim:
+Trust build, not docs. Before believing ANY "done"/"complete"/"committed" claim:
 
 ```bash
 git log --oneline -1          # note committed HEAD
 go build ./... && go test ./...
 ```
 
-- An ISC/task is "done" only when the **whole-repo** gate — `go build ./... && go test ./...`
-  run from the repository root — exits 0 against **committed** code with a real probe test.
-  "Files created" is NOT done. Per-package `go build ./<pkg>/` / `go test ./<pkg>/` is a floor
-  you may check while iterating, NOT a substitute for the root gate: new code that compiles in
-  isolation is exactly the code most likely to break the package that wires it in, so the
-  whole-repo run is the one that counts.
-- `go vet`, `gofmt`, `golangci-lint`, or a single-package pass is NOT the build passing. `vet`
-  routinely passes on code that does not compile as a whole program. The moment you are about
-  to report a proxy check in place of the root gate, that is the signal you have not run it.
-- An environmental blocker is an escalation, not a waiver. If the gate genuinely cannot run —
-  the sandbox blocking the Go build cache is the known case here; re-run outside the sandbox —
-  STOP and report "UNVERIFIED, blocked by X". Never downgrade to a weaker check and present its
-  result as though the gate had passed. Self-certifying around a blocker is how broken code
-  gets called done.
-- Uncommitted code that does not compile is worth zero. Do not build on top of it. If you
-  find broken uncommitted work, back it up and reset to the last green commit first.
-- Present is not wired, and wired is not done: a symbol that exists but nothing calls is dead
-  code, not a shipped feature. Grep the call site and exercise the real entry point (the
-  request handler, the route, the CLI command), not just the unit in isolation, before you
-  claim a criterion done.
+- ISC/task "done" only when **whole-repo** gate — `go build ./... && go test ./...` run from repo root — exits 0 against **committed** code with real probe test. "Files created" ≠ done. Per-package `go build ./<pkg>/` / `go test ./<pkg>/` is floor while iterating, NOT substitute for root gate: code that compiles in isolation most likely breaks package that wires it in, so whole-repo run counts.
+- `go vet`, `gofmt`, `golangci-lint`, or single-package pass is NOT build passing. `vet` routinely passes on code that doesn't compile as whole program. Moment you're about to report proxy check in place of root gate = signal you haven't run it.
+- Environmental blocker = escalation, not waiver. Gate can't run — sandbox blocking Go build cache is known case; re-run outside sandbox — STOP + report "UNVERIFIED, blocked by X". Never downgrade to weaker check + present result as though gate passed. Self-certifying around blocker = broken code gets called done.
+- Uncommitted code that doesn't compile = worth zero. Don't build on top. Find broken uncommitted work? Back it up + reset to last green commit first.
+- Present ≠ wired, wired ≠ done: symbol that exists but nothing calls is dead code, not shipped feature. Grep call site + exercise real entry point (request handler, route, CLI command), not just unit in isolation, before claiming criterion done.
 
 ## Local-model code-gen failure fingerprints
 
-Grep generated Go for these before trusting or committing it — every one has occurred in
-this repo:
+Grep generated Go for these before trusting or committing — all occurred in this repo:
 
 - literal `\!=` instead of `!=`
 - backslash-escaped quotes or backticks inside source (`\"`, malformed backtick regex literals)
 - split identifiers (`Tech nique` for `Technique`)
 - duplicate type declarations across files in one package
 - invalid recursive value types (`children [256]TrieNode` — use `map[byte]*TrieNode`)
-- references to config types/fields that were never defined
+- references to config types/fields never defined
 
 ## Parallel work rule
 
-One agent per disjoint package, isolated in a git worktree off green HEAD. Never edit shared
-files (`internal/config/config.go`, `internal/server/*`, `internal/sanitizer/manager.go`)
-from parallel agents — central proxy/config wiring is a SERIAL step done after packages land.
-Overlapping file targets cause transient build races.
+One agent per disjoint package, isolated in git worktree off green HEAD. Never edit shared files (`internal/config/config.go`, `internal/server/*`, `internal/sanitizer/manager.go`) from parallel agents — central proxy/config wiring is SERIAL step after packages land. Overlapping file targets cause transient build races.
 
 ## Hard constraints
 
-- No new external dependencies without explicit approval; Go stdlib preferred for all
-  detection logic.
-- LLM judge invoked only on SUSPICIOUS-flagged traffic; judge default is local
-  (Ollama/OMLX-class endpoint) — API-hosted judge models are explicit opt-in only.
+- No new external dependencies without explicit approval; Go stdlib preferred for all detection logic.
+- LLM judge invoked only on SUSPICIOUS-flagged traffic; judge default is local (Ollama/OMLX-class endpoint) — API-hosted judge models explicit opt-in only.
 - No regex with catastrophic backtracking potential; all patterns pre-compiled at startup.
-- Sanitiser must not add >10ms p99 latency to the non-judge request path.
+- Sanitiser must not add >10ms p99 latency to non-judge request path.
 - TLS 1.3 minimum; all log entries HMAC-protected.
 - Fail closed: judge timeout, refusal, or backend error → BLOCK, never ALLOW.
 
@@ -91,9 +65,8 @@ just clean        # remove build artifacts
 
 ## Handoff protocol
 
-When handing off (especially Claude ↔ local model via OMLX, e.g. at connectivity loss or
-session limits):
+When handing off (especially Claude ↔ local model via OMLX, e.g. connectivity loss or session limits):
 
-1. Commit green work; never hand off broken working-tree state without flagging it in ISA.md.
-2. Update `ISA.md`: checkbox state, `progress:` frontmatter, a Decisions entry naming HEAD.
-3. The next agent re-runs the build verification gate before reading any "done" claims.
+1. Commit green work; never hand off broken working-tree state without flagging in `ISA.md`.
+2. Update `ISA.md`: checkbox state, `progress:` frontmatter, Decisions entry naming HEAD.
+3. Next agent re-runs build verification gate before reading any "done" claims.

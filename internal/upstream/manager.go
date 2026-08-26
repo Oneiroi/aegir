@@ -12,6 +12,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -76,6 +77,9 @@ func secureDialContext(ctx context.Context, network, addr string) (net.Conn, err
 	} else {
 		resolved, lookupErr := dnsResolver.LookupHost(ctx, host)
 		if lookupErr != nil {
+			if isInternalSuffix(host) {
+				return nil, fmt.Errorf("SSRF blocked: hostname %q matches the internal suffix denylist and DNS failed: %w", host, lookupErr)
+			}
 			return nil, fmt.Errorf("dns lookup failed for %q: %w", host, lookupErr)
 		}
 		if len(resolved) == 0 {
@@ -104,6 +108,135 @@ func secureDialContext(ctx context.Context, network, addr string) (net.Conn, err
 func isRestrictedIP(ip net.IP) bool {
 	return ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
 		ip.IsPrivate() || ip.IsUnspecified() || ip.IsMulticast()
+}
+
+// IsRestrictedIP is the exported form of isRestrictedIP so callers outside
+// this package (internal/server) share one restricted-range definition
+// instead of mirroring it.
+func IsRestrictedIP(ip net.IP) bool { return isRestrictedIP(ip) }
+
+// IsRestrictedHost is the bracket-tolerant, zone-aware form of the same
+// predicate for parse-time checks: "fe80::1", "[fe80::1]",
+// "fe80::1%eth0" and "fe80::1%25eth0" are all judged by their address part.
+// Unparseable names return false here on purpose — the dial guard
+// (secureDialContext) is the second layer that fails them closed.
+func IsRestrictedHost(host string) bool {
+	h := strings.ToLower(strings.Trim(host, "[]"))
+	if un, err := url.PathUnescape(h); err == nil {
+		h = un
+	}
+	if i := strings.IndexByte(h, '%'); i >= 0 {
+		h = h[:i]
+	}
+	if h == "" {
+		return false
+	}
+	ip := net.ParseIP(h)
+	if ip == nil {
+		return false
+	}
+	return IsRestrictedIP(ip)
+}
+
+// internalSuffixDenylist is the static fail-closed denylist for the dial
+// guard (F3 bundle 2, amended: static list only — an operator exemption
+// for a reserved suffix belongs on the trusted-authority path).
+var internalSuffixDenylist = []string{".local", ".internal", ".localhost"}
+
+// isInternalSuffix reports whether host is "localhost"/"localdomain" or
+// ends with a reserved internal suffix.
+func isInternalSuffix(host string) bool {
+	h := strings.ToLower(host)
+	if h == "localhost" || h == "localdomain" {
+		return true
+	}
+	for _, suf := range internalSuffixDenylist {
+		if strings.HasSuffix(h, suf) {
+			return true
+		}
+	}
+	return false
+}
+
+// upstreamAuthority normalises a configured upstream URL into a lowercase
+// "host:port" authority string, filling in the scheme's default port when the
+// URL omits one (net/http's Transport always dials host:port, so the
+// dial-time address carries the default port even when the URL does not).
+// Returns the authority and the bare hostname; both empty if unparseable.
+func upstreamAuthority(rawURL string) (authority, host string) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", ""
+	}
+	host = u.Hostname()
+	if host == "" {
+		return "", ""
+	}
+	port := u.Port()
+	if port == "" {
+		if strings.EqualFold(u.Scheme, "https") {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	return strings.ToLower(host) + ":" + port, host
+}
+
+// secureDialContext applies the package-level SSRF dial guard, exempting the
+// authorities the operator explicitly configured as upstream services (F1).
+// The exemption is identity-based: the configured "host:port" authority is
+// matched as a string and resolved IPs are NOT re-checked for allowlisted
+// entries. Everything else gets the full DNS-resolution + per-IP guard.
+func (m *Manager) secureDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid address %q: %w", addr, err)
+	}
+	key := strings.ToLower(host) + ":" + port
+	if _, ok := m.trustedAuthorities[key]; ok {
+		dialer := &net.Dialer{Timeout: 30 * time.Second}
+		conn, err := dialer.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		// F1 forensics: audit record for every dial that used the
+		// trusted-authority exemption — the identity match is deliberate
+		// (resolved IPs are not re-checked); this entry is the
+		// DNS-rebinding trail an operator can inspect after the fact.
+		m.logger.Info("upstream_trusted_dial",
+			"authority", key,
+			"remote_addr", conn.RemoteAddr().String())
+		return conn, nil
+	}
+	return secureDialContext(ctx, network, addr)
+}
+
+// warnIfRestrictedUpstream logs a startup-visible warning when an allowlisted
+// (operator-configured) upstream authority is, or resolves to, a restricted
+// range. The exemption is deliberate operator trust; the warning keeps that
+// trust decision visible without refusing the configuration.
+func (m *Manager) warnIfRestrictedUpstream(name, rawURL, host string) {
+	restricted := false
+	if ip := net.ParseIP(host); ip != nil {
+		restricted = isRestrictedIP(ip)
+	} else {
+		lower := strings.ToLower(host)
+		if lower == "localhost" || strings.HasSuffix(lower, ".localhost") {
+			restricted = true
+		} else if resolved, err := dnsResolver.LookupHost(context.Background(), host); err == nil {
+			for _, a := range resolved {
+				if ip := net.ParseIP(a); ip != nil && isRestrictedIP(ip) {
+					restricted = true
+					break
+				}
+			}
+		}
+	}
+	if restricted {
+		m.logger.Warn("Configured upstream is in a restricted range; exempted by operator configuration trust",
+			"service", name, "url", rawURL)
+	}
 }
 
 // ServiceState represents the current state of an upstream service
@@ -137,6 +270,10 @@ type Manager struct {
 	indexMutex    sync.Mutex
 	tlsCfg        UpstreamTLSConfig
 	tlsCfgMu      sync.RWMutex
+	// trustedAuthorities holds the lowercase "host:port" authorities of the
+	// operator-configured, enabled upstream services. secureDialContext
+	// exempts exactly these identities from the restricted-IP dial guard (F1).
+	trustedAuthorities map[string]struct{}
 }
 
 // MCPRequest represents a request to forward to upstream services
@@ -168,14 +305,15 @@ type MCPError struct {
 // NewManager creates a new upstream service manager
 func NewManager(config *config.Upstream, logger *logging.Logger) *Manager {
 	m := &Manager{
-		config:   config,
-		logger:   logger,
-		services: make(map[string]*ServiceState),
-		httpClient: &http.Client{
-			Timeout: time.Duration(config.HealthCheck.Timeout) * time.Second,
-			Transport: &http.Transport{
-				DialContext: secureDialContext,
-			},
+		config:             config,
+		logger:             logger,
+		services:           make(map[string]*ServiceState),
+		trustedAuthorities: make(map[string]struct{}),
+	}
+	m.httpClient = &http.Client{
+		Timeout: time.Duration(config.HealthCheck.Timeout) * time.Second,
+		Transport: &http.Transport{
+			DialContext: m.secureDialContext,
 		},
 	}
 
@@ -188,6 +326,13 @@ func NewManager(config *config.Upstream, logger *logging.Logger) *Manager {
 				LastCheck:    time.Now(),
 				FailureCount: 0,
 				CircuitState: CircuitClosed,
+			}
+			// F1: an operator-configured upstream is trusted by identity —
+			// exempt its authority from the restricted-IP dial guard so
+			// loopback/private upstreams (the default deployment shape) work.
+			if authority, host := upstreamAuthority(service.URL); authority != "" {
+				m.trustedAuthorities[authority] = struct{}{}
+				m.warnIfRestrictedUpstream(service.Name, service.URL, host)
 			}
 		}
 	}
@@ -237,6 +382,17 @@ func (m *Manager) ConfigureTLS(tlsCfg UpstreamTLSConfig) error {
 	m.tlsCfg = tlsCfg
 	m.tlsCfgMu.Unlock()
 	return nil
+}
+
+// HasConfiguredServices reports whether the manager has any enabled upstream
+// services configured. The proxy uses this to distinguish standalone firewall
+// mode (no upstreams — local handling is legitimate) from upstream mode,
+// where a forward failure must fail closed instead of falling back to local
+// handling (F1).
+func (m *Manager) HasConfiguredServices() bool {
+	m.servicesMutex.RLock()
+	defer m.servicesMutex.RUnlock()
+	return len(m.services) > 0
 }
 
 // ForwardRequest forwards an MCP request to an appropriate upstream service
@@ -452,7 +608,7 @@ func (m *Manager) createHTTPClient(service *ServiceState) *http.Client {
 	// one used by ForwardRequest and checkServiceHealth, so the SSRF policy
 	// must be enforced at this layer as well.
 	transport := &http.Transport{
-		DialContext: secureDialContext,
+		DialContext: m.secureDialContext,
 	}
 
 	// Read manager-wide TLS config under the read-lock so that concurrent
