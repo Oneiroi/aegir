@@ -2,6 +2,7 @@ package sanitizer
 
 import (
 	"encoding/base64"
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -114,6 +115,26 @@ func (m *Manager) SanitizeContent(content string) *SanitizationResult {
 	if !m.config.Detection.Enabled {
 		result.Metadata["detection"] = "disabled"
 		return result
+	}
+
+	// F5 (bundle 4): fold visible confusables (Cyrillic lookalikes,
+	// fullwidth ASCII, math bold) on the WORKING copy before any pattern
+	// matching; result.Original keeps the raw input. Unconditional under
+	// the master gate — no config knob. One low-severity detection
+	// reports the fold; fold-only results keep Risk "low" and never
+	// route to the judge (calculateRiskLevel returns "low" for
+	// all-low detections; sanitizerVerdictToJudge routes SUSPICIOUS
+	// only on medium-or-above). NOTE: this supersedes detectHomoglyphs
+	// below, which therefore goes inert (its 4 runes are already ASCII
+	// by the time it runs).
+	if folded, n := detection.FoldConfusables(result.Sanitized, nil); n > 0 {
+		result.Sanitized = folded
+		result.Detections = append(result.Detections, Detection{
+			Type:        "confusables_fold",
+			Pattern:     fmt.Sprintf("%d runes folded", n),
+			Severity:    "low",
+			Replacement: "confusables folded to ASCII",
+		})
 	}
 
 	// Command injection detection and prevention
@@ -528,7 +549,12 @@ func (m *Manager) sanitizeSQLInjection(content string, result *SanitizationResul
 	return content
 }
 
-// detectHomoglyphs detects suspicious homoglyph characters
+// detectHomoglyphs detects suspicious homoglyph characters.
+// Bundle 4 (F5): superseded — FoldConfusables at the SanitizeContent
+// entry already maps the covered Cyrillic runes to ASCII, so this
+// replace-to-marker pass goes inert (its ContainsRune checks never
+// fire on folded text). Kept for the HomoglyphFilter config surface;
+// remove in a later cleanup bundle.
 func (m *Manager) detectHomoglyphs(content string, result *SanitizationResult) string {
 	// Common homoglyph patterns (simplified implementation)
 	homoglyphs := map[rune]string{
@@ -598,6 +624,19 @@ func (m *Manager) calculateRiskLevel(detections []Detection) string {
 	}
 	if hasHigh {
 		return "high"
+	}
+	// All detections low severity (e.g. confusables_fold only): no risk
+	// bump at all — pure-informational results must not escalate benign
+	// confusable text (F5, bundle 4 fix round).
+	allLow := true
+	for _, d := range detections {
+		if d.Severity != "low" {
+			allLow = false
+			break
+		}
+	}
+	if allLow {
+		return "low"
 	}
 	return "medium"
 }

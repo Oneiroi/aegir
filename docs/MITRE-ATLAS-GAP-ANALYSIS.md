@@ -109,12 +109,12 @@ Techniques targeting these surfaces are **structurally out of scope** for Aegir 
 | AML.T0054.007 | Jailbreak — Crescendo (slow escalation) | PARTIAL | `session/analyzer.go:analyzeJailbreakProgression()` detects `dan_progression` and `grandmother_exploit` via substring match | LLM.CR.001/002 IOC patterns dead; session analyzer uses substring matching, not regex; genuine Crescendo (no explicit keywords) bypasses all detection |
 | POLY.001 | Case Variation Bypass | COVERED | `manager.go:detectPromptInjection()` uses `(?i)` throughout | Case-insensitive matching active |
 | POLY.002 | Spacing Variation Bypass | COVERED | `manager.go:collapseSpacingVariant()` active | Normalises "i g n o r e" before pattern matching |
-| POLY.003 | Leet Speak Bypass | NOT COVERED | IOC POLY.003 dead; no leet-speak normalisation pass exists in active code | Test references leet speak but normalisation not implemented |
-| POLY.004 | Emoji Obfuscation | PARTIAL | IOC POLY.004 dead; homoglyph detection in manager.go covers 4 Cyrillic chars | Emoji within words not stripped/normalised before pattern matching |
-| POLY.005 | Mixed Script (Cyrillic) | PARTIAL | `manager.go:detectHomoglyphs()` covers 4 chars (а,е,о,с); IOC POLY.005 dead | Full Cyrillic Unicode block (Ѐ-ӿ) in IOC pattern is dead |
+| POLY.003 | Leet Speak Bypass | COVERED | Live: `manager.go:normalizeLeet()` in detectPromptInjection + `detection.go:Normalize()` rule 1 (0→o 1→i 3→e 4→a 5→s @→a); IOC POLY.003 regex still dead | Leet covered by the normalisation passes, not by the IOC |
+| POLY.004 | Emoji Obfuscation | PARTIAL | IOC POLY.004 dead; bundle-4 `FoldConfusables` (detection.go) covers Cyrillic/fullwidth/math; the old 4-rune replace is superseded | Emoji and format chars within words still unnormalised on the regex path (POLY.007 follow-up) |
+| POLY.005 | Mixed Script (Cyrillic) | COVERED | Bundle-4 `FoldConfusables` folds the full Cyrillic lookalike set (case-paired; pre-bundle-4 `detectHomoglyphs` replace covered 4 chars: а,е,о,р); IOC POLY.005 regex still dead | F5 B04 class (Cyrillic homoglyphs) caught post-fold |
 | POLY.006 | RTL Override | COVERED | `manager.go:detectPromptInjection()` has explicit `‮` RTL char detection | Active |
 | POLY.007 | Zero-Width Characters | PARTIAL | IOC LLM.JB.003 covers some zero-width chars; manager.go RTL detection active | Full zero-width character set in IOC is dead |
-| POLY.008 | Homoglyph (full Cyrillic) | PARTIAL | 4 chars in active code; full range in dead IOC | See POLY.005 |
+| POLY.008 | Homoglyph (full Cyrillic) | COVERED | Same bundle-4 fold as POLY.005; the 4-rune replace (а,е,о,р) in `detectHomoglyphs` is superseded/inert | See POLY.005 |
 | LLM.ML.001 | Low-Resource Language Attack | NOT COVERED | IOC LLM.ML.001 dead; pattern is too narrow anyway (keyword matching on language names) | Genuine low-resource language attacks don't announce their language |
 | LLM.ML.002 | Language Mixing / Code-Switching | PARTIAL | IOC LLM.ML.004 dead; anomaly detector may score high-non-ASCII but doesn't block | No live detection |
 | LLM.ML.004 | Code-Switching Mid-Sentence | NOT COVERED | IOC LLM.ML.004 dead | — |

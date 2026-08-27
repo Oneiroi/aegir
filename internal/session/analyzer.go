@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aegishjalmur/aegir/internal/detection"
 	"github.com/aegishjalmur/aegir/internal/logging"
 )
 
@@ -805,8 +806,11 @@ func (cta *ConversationalThreatAnalyzer) analyzeMessageContent(content string) M
 		Detections:  []string{},
 	}
 
-	// Basic threat indicators (pre-compiled, bundle 3)
-	content_lower := strings.ToLower(content)
+	// Basic threat indicators (pre-compiled, bundle 3). Bundle 4 (F5): fold
+	// visible confusables before lowercasing so Cyrillic/fullwidth/math
+	// lookalike spellings of the indicator phrases still match.
+	folded, _ := detection.FoldConfusables(content, nil)
+	content_lower := strings.ToLower(folded)
 	for pattern, tp := range threatPatternScores {
 		if tp.re.MatchString(content_lower) {
 			ctx.ThreatScore += tp.score

@@ -39,12 +39,14 @@ func TestJudgeReasonNeverLeaksToClient(t *testing.T) {
 	logger := testLogger()
 	ruleEng := judge.NewRuleEngine(&reasonLeakJudge{reason: canary}, logger)
 
-	// Enable detection + homoglyph filter so the Cyrillic 'а' (U+0430) in the
-	// payload below triggers a medium-severity detection — detected but NOT
-	// blocked by the sanitizer, so the payload reaches the mock judge.
+	// Enable detection + secret detection. The payload below carries a
+	// medium-severity secret detection (detected, NOT blocked) so the
+	// payload reaches the mock judge; the Cyrillic 'а' (U+0430) is folded
+	// to ASCII by the F5 confusables fold (low severity, judge-irrelevant).
 	secCfg := config.Security{
-		Detection:    config.Detection{Enabled: true},
-		Sanitization: config.Sanitization{Enabled: true, HomoglyphFilter: true},
+		Detection:       config.Detection{Enabled: true},
+		Sanitization:    config.Sanitization{Enabled: true, HomoglyphFilter: true},
+		SecretDetection: config.SecretDetection{Enabled: true, Passwords: true},
 	}
 	proxy := NewMCPProxy(
 		&config.Config{Security: secCfg},
@@ -60,12 +62,15 @@ func TestJudgeReasonNeverLeaksToClient(t *testing.T) {
 	r := gin.New()
 	r.POST("/mcp", proxy.HandleMCPRequest)
 
-	// Cyrillic 'а' (U+0430, not ASCII 'a') triggers homoglyph detection at
-	// medium severity — the sanitizer flags but does not block it, so the
-	// payload is routed SUSPICIOUS → mock judge → BLOCK.
+	// The embedded credential (password=…) is medium severity — the
+	// sanitizer flags but does not block it, so the payload is routed
+	// SUSPICIOUS → mock judge → BLOCK. (Pre-F5 this probe used a
+	// Cyrillic-homoglyph medium detection; the F5 fold makes lone
+	// lookalikes low-severity, so the probe now rides on the secret.
+	// The Cyrillic 'а' stays to keep the fold on the path.)
 	body, _ := json.Marshal(MCPRequest{
 		Method: "tools/call",
-		Params: map[string]interface{}{"name": "test", "q": "аnything"},
+		Params: map[string]interface{}{"name": "test", "q": "аnything password=hunter2secret "},
 		ID:     "leak-1",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
@@ -103,8 +108,9 @@ func TestJudgeReasonExposedWhenOptedIn(t *testing.T) {
 	ruleEng := judge.NewRuleEngine(&reasonLeakJudge{reason: canary}, logger)
 
 	secCfg := config.Security{
-		Detection:    config.Detection{Enabled: true},
-		Sanitization: config.Sanitization{Enabled: true, HomoglyphFilter: true},
+		Detection:       config.Detection{Enabled: true},
+		Sanitization:    config.Sanitization{Enabled: true, HomoglyphFilter: true},
+		SecretDetection: config.SecretDetection{Enabled: true, Passwords: true},
 	}
 	proxy := NewMCPProxy(
 		&config.Config{Judge: config.JudgeConfig{ExposeReasoning: true}, Security: secCfg},
@@ -118,7 +124,7 @@ func TestJudgeReasonExposedWhenOptedIn(t *testing.T) {
 	r := gin.New()
 	r.POST("/mcp", proxy.HandleMCPRequest)
 
-	body, _ := json.Marshal(MCPRequest{Method: "tools/call", Params: map[string]interface{}{"name": "test", "q": "аnything"}, ID: "expose-1"})
+	body, _ := json.Marshal(MCPRequest{Method: "tools/call", Params: map[string]interface{}{"name": "test", "q": "аnything password=hunter2secret "}, ID: "expose-1"})
 	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()

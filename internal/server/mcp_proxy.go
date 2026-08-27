@@ -2495,10 +2495,31 @@ func sanitizeSessionID(s string) string {
 
 // sanitizerVerdictToJudge maps the sanitizer's risk signal to a judge routing
 // verdict. ALLOW short-circuits the judge (no LLM call, zero latency);
-// SUSPICIOUS routes the payload to the configured judge model for deeper analysis.
-// Payloads that the sanitizer has already blocked never reach this function.
+// SUSPICIOUS routes the payload to the configured judge model for deeper
+// analysis. Payloads that the sanitizer has already blocked never reach
+// this function. SUSPICIOUS requires a genuine signal: at least one
+// detection of severity "medium" or above, or an aggregated Risk of
+// "medium" or above. Low-severity-only results (e.g. a confusables_fold
+// reporting a fold with no other findings) return ALLOW — fail-closed
+// judge invocation on benign confusable text is an availability
+// regression (F5, bundle 4 fix round).
 func sanitizerVerdictToJudge(result *sanitizer.SanitizationResult) judge.Verdict {
-	if result != nil && (len(result.Detections) > 0 || result.Risk == "medium" || result.Risk == "high" || result.Risk == "critical") {
+	if result == nil {
+		return judge.ALLOW
+	}
+	severityAtLeastMedium := func(s string) bool {
+		switch s {
+		case "medium", "high", "critical":
+			return true
+		}
+		return false
+	}
+	for _, d := range result.Detections {
+		if severityAtLeastMedium(d.Severity) {
+			return judge.SUSPICIOUS
+		}
+	}
+	if result.Risk == "medium" || result.Risk == "high" || result.Risk == "critical" {
 		return judge.SUSPICIOUS
 	}
 	return judge.ALLOW
