@@ -333,41 +333,64 @@ type CommandInjection struct {
 
 // Compliance configuration
 type Compliance struct {
-	HIPAA HIPAAConfig `json:"hipaa"            mapstructure:"hipaa"`
-	PCI   PCIConfig   `json:"pci"              mapstructure:"pci"`
-	GDPR  GDPRConfig  `json:"gdpr"             mapstructure:"gdpr"`
-	SOC2  SOC2Config  `json:"soc2"             mapstructure:"soc2"`
+	// Enabled is the single operator-facing compliance master switch
+	// (bundle 5, F6): false (the default) disables all PII/PHI/PCI
+	// detection; true enables every regulation class unless a class
+	// explicitly opts out.
+	Enabled bool        `json:"enabled"           mapstructure:"enabled"`
+	HIPAA   HIPAAConfig `json:"hipaa"            mapstructure:"hipaa"`
+	PCI     PCIConfig   `json:"pci"              mapstructure:"pci"`
+	GDPR    GDPRConfig  `json:"gdpr"             mapstructure:"gdpr"`
+	SOC2    SOC2Config  `json:"soc2"             mapstructure:"soc2"`
 	// ResponsePolicy maps violation type (e.g. "pii", "phi", "pci") to the action
 	// taken when that data type is found in a response: "block", "redact", or
 	// "log-only". Absent types fall back to "redact". Configured via
 	// compliance.response_policy in aegir.yaml (ISC-28).
 	ResponsePolicy map[string]string `json:"response_policy"  mapstructure:"response_policy"`
+	// RequestPolicy maps violation type ("pii", "phi", "pci") to the
+	// action taken when that data type is found in a REQUEST: "block",
+	// "redact", or "log-only". Absent types fall back to severity
+	// defaults (critical -> block, high -> redact, else log-only); any
+	// critical-severity violation always blocks regardless of this map
+	// (bundle 5, N3/F6 request/response alignment).
+	RequestPolicy map[string]string `json:"request_policy"   mapstructure:"request_policy"`
 }
 
-// HIPAAConfig for HIPAA compliance
+// HIPAAConfig for HIPAA compliance. Enabled is an opt-out when the master
+// switch is on (unset defaults follow the master, bundle 5).
 type HIPAAConfig struct {
 	Enabled      bool `json:"enabled"       mapstructure:"enabled"`
 	PHIDetection bool `json:"phi_detection" mapstructure:"phi_detection"`
-	Encryption   bool `json:"encryption"    mapstructure:"encryption"`
-	AuditTrail   bool `json:"audit_trail"   mapstructure:"audit_trail"`
+	// Encryption is reserved, no-op — no implementation consumes it.
+	Encryption bool `json:"encryption"    mapstructure:"encryption"`
+	// AuditTrail is reserved, no-op — compliance events always log via the
+	// HMAC-protected security event stream.
+	AuditTrail bool `json:"audit_trail"   mapstructure:"audit_trail"`
 }
 
-// PCIConfig for PCI DSS compliance
+// PCIConfig for PCI DSS compliance. Enabled is an opt-out when the master
+// switch is on (unset defaults follow the master, bundle 5).
 type PCIConfig struct {
-	Enabled        bool `json:"enabled"         mapstructure:"enabled"`
-	CardDetection  bool `json:"card_detection"  mapstructure:"card_detection"`
-	TokenizeCards  bool `json:"tokenize_cards"  mapstructure:"tokenize_cards"`
+	Enabled       bool `json:"enabled"         mapstructure:"enabled"`
+	CardDetection bool `json:"card_detection"  mapstructure:"card_detection"`
+	TokenizeCards bool `json:"tokenize_cards"  mapstructure:"tokenize_cards"`
+	// EncryptStorage is reserved, no-op — no implementation consumes it.
 	EncryptStorage bool `json:"encrypt_storage" mapstructure:"encrypt_storage"`
 }
 
-// GDPRConfig for GDPR compliance
+// GDPRConfig for GDPR compliance. Enabled is an opt-out when the master
+// switch is on (unset defaults follow the master, bundle 5).
 type GDPRConfig struct {
-	Enabled         bool   `json:"enabled"          mapstructure:"enabled"`
-	PIIDetection    bool   `json:"pii_detection"    mapstructure:"pii_detection"`
-	RightToErasure  bool   `json:"right_to_erasure" mapstructure:"right_to_erasure"`
-	DataPortability bool   `json:"data_portability" mapstructure:"data_portability"`
-	ConsentTracking bool   `json:"consent_tracking" mapstructure:"consent_tracking"`
-	Region          string `json:"region"           mapstructure:"region"`
+	Enabled      bool `json:"enabled"          mapstructure:"enabled"`
+	PIIDetection bool `json:"pii_detection"    mapstructure:"pii_detection"`
+	// RightToErasure is reserved, no-op — no implementation consumes it.
+	RightToErasure bool `json:"right_to_erasure" mapstructure:"right_to_erasure"`
+	// DataPortability is reserved, no-op — no implementation consumes it.
+	DataPortability bool `json:"data_portability" mapstructure:"data_portability"`
+	// ConsentTracking is reserved, no-op — no implementation consumes it.
+	ConsentTracking bool `json:"consent_tracking" mapstructure:"consent_tracking"`
+	// Region is reserved, no-op — detection patterns are region-agnostic.
+	Region string `json:"region"           mapstructure:"region"`
 }
 
 // SOC2Config for SOC 2 compliance
@@ -593,6 +616,8 @@ func LoadWithConfigFile(configFile string) (*Config, error) {
 		// Config file not found; ignore error and use defaults + env vars
 	}
 
+	applyComplianceMasterDefaults(v)
+
 	// Unmarshal into config struct
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {
@@ -655,6 +680,8 @@ func LoadWithConfigDir(configDir string) (*Config, error) {
 		}
 		// Config file not found; ignore error and use defaults + env vars
 	}
+
+	applyComplianceMasterDefaults(v)
 
 	// Unmarshal into config struct
 	var cfg Config
@@ -760,10 +787,18 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("security.detection_enabled", true)
 
 	// Compliance defaults
-	v.SetDefault("compliance.hipaa.enabled", false)
-	v.SetDefault("compliance.pci.enabled", false)
-	v.SetDefault("compliance.gdpr.enabled", false)
+	// Bundle 5 (F6): single compliance master switch. Off by default — the
+	// historical posture. Per-class and sub-detection defaults that follow
+	// the master are injected AFTER ReadInConfig (applyComplianceMasterDefaults)
+	// so the file/env master value is known; an explicit yaml value always
+	// beats a default, which is how explicit-false opt-outs stay possible.
+	v.SetDefault("compliance.enabled", false)
 	v.SetDefault("compliance.soc2.enabled", false)
+	v.SetDefault("compliance.request_policy", map[string]interface{}{
+		"pii": "redact",
+		"phi": "redact",
+		"pci": "redact",
+	})
 	// Per-data-type response policy defaults (ISC-28): redact all regulated types by default.
 	v.SetDefault("compliance.response_policy", map[string]interface{}{
 		"pii": "redact",
@@ -903,6 +938,31 @@ func validateConfig(cfg *Config) error {
 	return nil
 }
 
+// applyComplianceMasterDefaults injects the master-derived class and
+// sub-detection defaults (bundle 5, F6). It must run AFTER ReadInConfig:
+// viper.IsSet only reports keys the file/env explicitly provided (a plain
+// SetDefault value is not "set"), so a key still unset after the file read
+// gets the master's value as its default — master on + unset class/sub =>
+// enabled; master off => off; an EXPLICIT file value (true or false)
+// always wins because file > default in viper precedence. This is the
+// explicit-false-vs-unset mechanism for the compliance tree.
+func applyComplianceMasterDefaults(v *viper.Viper) {
+	master := v.GetBool("compliance.enabled")
+	derived := map[string]any{
+		"compliance.hipaa.enabled":       master,
+		"compliance.pci.enabled":         master,
+		"compliance.gdpr.enabled":        master,
+		"compliance.hipaa.phi_detection": master,
+		"compliance.pci.card_detection":  master,
+		"compliance.gdpr.pii_detection":  master,
+	}
+	for key, val := range derived {
+		if !v.IsSet(key) {
+			v.SetDefault(key, val)
+		}
+	}
+}
+
 // LoadLegacy loads configuration from environment variables and defaults (legacy method)
 func LoadLegacy() (*Config, error) {
 	cfg := &Config{
@@ -998,32 +1058,38 @@ func LoadLegacy() (*Config, error) {
 				StrictMode: getEnvAsBool("COMMAND_INJECTION_STRICT", true),
 			},
 		},
-		Compliance: Compliance{
-			HIPAA: HIPAAConfig{
-				Enabled:      getEnvAsBool("HIPAA_ENABLED", false),
-				PHIDetection: getEnvAsBool("PHI_DETECTION", false),
-				Encryption:   getEnvAsBool("HIPAA_ENCRYPTION", false),
-				AuditTrail:   getEnvAsBool("HIPAA_AUDIT", false),
-			},
-			PCI: PCIConfig{
-				Enabled:        getEnvAsBool("PCI_ENABLED", false),
-				CardDetection:  getEnvAsBool("CARD_DETECTION", false),
-				TokenizeCards:  getEnvAsBool("TOKENIZE_CARDS", false),
-				EncryptStorage: getEnvAsBool("PCI_ENCRYPT_STORAGE", false),
-			},
-			GDPR: GDPRConfig{
-				Enabled:         getEnvAsBool("GDPR_ENABLED", false),
-				PIIDetection:    getEnvAsBool("PII_DETECTION", false),
-				RightToErasure:  getEnvAsBool("RIGHT_TO_ERASURE", false),
-				DataPortability: getEnvAsBool("DATA_PORTABILITY", false),
-				ConsentTracking: getEnvAsBool("CONSENT_TRACKING", false),
-				Region:          getEnv("GDPR_REGION", "EU"),
-			},
-			SOC2: SOC2Config{
-				Enabled: getEnvAsBool("SOC2_ENABLED", false),
-				Type2:   getEnvAsBool("SOC2_TYPE2", false),
-			},
-		},
+		Compliance: func() Compliance {
+			// Bundle 5: class/sub defaults follow the master switch so an
+			// unset flag is enabled when (and only when) the master is on.
+			master := getEnvAsBool("COMPLIANCE_ENABLED", false)
+			return Compliance{
+				Enabled: master,
+				HIPAA: HIPAAConfig{
+					Enabled:      getEnvAsBool("HIPAA_ENABLED", master),
+					PHIDetection: getEnvAsBool("PHI_DETECTION", master),
+					Encryption:   getEnvAsBool("HIPAA_ENCRYPTION", false),
+					AuditTrail:   getEnvAsBool("HIPAA_AUDIT", false),
+				},
+				PCI: PCIConfig{
+					Enabled:        getEnvAsBool("PCI_ENABLED", master),
+					CardDetection:  getEnvAsBool("CARD_DETECTION", master),
+					TokenizeCards:  getEnvAsBool("TOKENIZE_CARDS", false),
+					EncryptStorage: getEnvAsBool("PCI_ENCRYPT_STORAGE", false),
+				},
+				GDPR: GDPRConfig{
+					Enabled:         getEnvAsBool("GDPR_ENABLED", master),
+					PIIDetection:    getEnvAsBool("PII_DETECTION", master),
+					RightToErasure:  getEnvAsBool("RIGHT_TO_ERASURE", false),
+					DataPortability: getEnvAsBool("DATA_PORTABILITY", false),
+					ConsentTracking: getEnvAsBool("CONSENT_TRACKING", false),
+					Region:          getEnv("GDPR_REGION", "EU"),
+				},
+				SOC2: SOC2Config{
+					Enabled: getEnvAsBool("SOC2_ENABLED", false),
+					Type2:   getEnvAsBool("SOC2_TYPE2", false),
+				},
+			}
+		}(),
 		SessionAnalysis: SessionAnalysis{
 			Enabled:                  getEnvAsBool("SESSION_ANALYSIS_ENABLED", true),
 			MaxSessionAge:            time.Duration(getEnvAsInt("SESSION_MAX_AGE_MINUTES", 30)) * time.Minute,

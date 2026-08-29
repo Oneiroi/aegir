@@ -56,6 +56,30 @@ func NewComplianceManager(config config.Compliance, logger *logging.Logger) *Com
 	return cm
 }
 
+// classEnabled resolves a per-regulation class flag under the master
+// switch: unset defaults ON when the master is on, explicit false opts out
+// (config-side viper.SetDefault / env-default injection carries the master
+// value in — see config.go bundle 5 note).
+func (cm *ComplianceManager) classEnabled(v bool) bool {
+	return cm.config.Enabled && v
+}
+
+// subEnabled resolves a sub-detection flag the same way classEnabled does.
+func (cm *ComplianceManager) subEnabled(v, classEnabled bool) bool {
+	return classEnabled && v
+}
+
+// panPatterns are the raw PAN patterns whose matches must pass Luhn
+// validation before they count as critical card data (bundle 5, F6 card FP
+// posture): a Luhn-invalid match is a low-severity, log-only
+// "pan_unvalidated" finding and is never redacted.
+var panPatterns = map[string]bool{
+	"visa":       true,
+	"mastercard": true,
+	"amex":       true,
+	"discover":   true,
+}
+
 // ScanForCompliance scans content for compliance violations
 func (cm *ComplianceManager) ScanForCompliance(content string) *ComplianceResult {
 	result := &ComplianceResult{
@@ -67,19 +91,28 @@ func (cm *ComplianceManager) ScanForCompliance(content string) *ComplianceResult
 		Violations:     []Violation{},
 	}
 
+	// Bundle 5 (F6): single master gate. Off (the default) => identity /
+	// "low" / no logging — today's default posture preserved exactly.
+	// On => every class runs unless a class or sub-detection flag
+	// explicitly opts out (unset flags default on — config-side default
+	// injection, so an explicit false still means off).
+	if !cm.config.Enabled {
+		return result
+	}
+
 	// PCI DSS Card Data Detection — must run before PII so card numbers
 	// aren't partially consumed by phone/SSN patterns first
-	if cm.config.PCI.Enabled && cm.config.PCI.CardDetection {
+	if cm.classEnabled(cm.config.PCI.Enabled) && cm.subEnabled(cm.config.PCI.CardDetection, cm.config.PCI.Enabled) {
 		result = cm.detectPCI(result)
 	}
 
 	// HIPAA PHI Detection
-	if cm.config.HIPAA.Enabled && cm.config.HIPAA.PHIDetection {
+	if cm.classEnabled(cm.config.HIPAA.Enabled) && cm.subEnabled(cm.config.HIPAA.PHIDetection, cm.config.HIPAA.Enabled) {
 		result = cm.detectPHI(result)
 	}
 
 	// GDPR/CCPA PII Detection
-	if cm.config.GDPR.Enabled && cm.config.GDPR.PIIDetection {
+	if cm.classEnabled(cm.config.GDPR.Enabled) && cm.subEnabled(cm.config.GDPR.PIIDetection, cm.config.GDPR.Enabled) {
 		result = cm.detectPII(result)
 	}
 
@@ -134,6 +167,13 @@ func (cm *ComplianceManager) detectPHI(result *ComplianceResult) *ComplianceResu
 	content := result.Sanitized
 
 	for patternName, cp := range cm.phiPatterns {
+		// Bundle 5 (note C): card patterns live in the PCI class — a card
+		// number is not PHI. The PHI map keeps the patterns for table
+		// completeness, but detection/redaction count them under PCI only
+		// (otherwise one number yields duplicate phi+pci violations).
+		if panPatterns[patternName] || patternName == "pan_masked" || patternName == "cvv" {
+			continue
+		}
 		matches := cp.re.FindAllStringIndex(content, -1)
 
 		for _, match := range matches {
@@ -169,36 +209,54 @@ func (cm *ComplianceManager) detectPCI(result *ComplianceResult) *ComplianceResu
 	content := result.Sanitized
 
 	for patternName, cp := range cm.pciPatterns {
+		luhnGate := panPatterns[patternName]
 		matches := cp.re.FindAllStringIndex(content, -1)
 
 		for _, match := range matches {
-			detection := Detection{
-				Type:        "pci_" + patternName,
+			span := content[match[0]:match[1]]
+
+			severity := cp.severity
+			name := patternName
+			valid := true
+			if luhnGate {
+				// Bundle 5 (F6): Luhn-invalid PANs are almost certainly
+				// invoice/batch IDs — log-only, no redaction, no block.
+				valid = cm.isValidCreditCard(span)
+				if !valid {
+					severity = "low"
+					name = "pan_unvalidated"
+				}
+			}
+
+			result.PCIDetections = append(result.PCIDetections, Detection{
+				Type:        "pci_" + name,
 				Pattern:     patternName,
 				Replacement: "CARD_DATA_REDACTED",
 				Position:    match[0],
-				Severity:    cp.severity,
-			}
-			result.PCIDetections = append(result.PCIDetections, detection)
-
-			violation := Violation{
+				Severity:    severity,
+			})
+			result.Violations = append(result.Violations, Violation{
 				Type:        "pci",
 				Regulation:  "PCI DSS",
-				Severity:    cp.severity,
-				Description: "Payment card data detected: " + patternName,
+				Severity:    severity,
+				Description: "Payment card data detected: " + name,
 				Pattern:     patternName,
 				Position:    match[0],
-			}
-			result.Violations = append(result.Violations, violation)
+			})
 		}
 
-		if cm.config.PCI.TokenizeCards {
-			content = cp.re.ReplaceAllStringFunc(content, func(match string) string {
+		// Redaction follows the same Luhn rule: PAN matches are masked
+		// (or tokenized) only when they validate; anything else is left
+		// in place because it is not card data.
+		content = cp.re.ReplaceAllStringFunc(content, func(match string) string {
+			if luhnGate && !cm.isValidCreditCard(match) {
+				return match
+			}
+			if cm.config.PCI.TokenizeCards {
 				return cm.tokenizeCardData(match)
-			})
-		} else {
-			content = cp.re.ReplaceAllString(content, "CARD_DATA_REDACTED")
-		}
+			}
+			return "CARD_DATA_REDACTED"
+		})
 	}
 
 	result.Sanitized = content
@@ -291,6 +349,11 @@ func (cm *ComplianceManager) logComplianceEvent(result *ComplianceResult) {
 		},
 	}
 
+	// Kimi/A5 footgun: isolated probes may construct the manager with a
+	// nil logger — the event is intentionally skipped, never a panic.
+	if cm.logger == nil {
+		return
+	}
 	cm.logger.LogSecurityEvent(event)
 }
 

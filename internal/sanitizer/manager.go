@@ -20,9 +20,6 @@ type Manager struct {
 	logger               *logging.Logger
 	commandInjectionRe   []*regexp.Regexp
 	secretPatterns       []*regexp.Regexp
-	piiPatterns          []*regexp.Regexp
-	phiPatterns          []*regexp.Regexp
-	pciPatterns          []*regexp.Regexp
 	homoglyphPatterns    []*regexp.Regexp
 	xssPatterns          []*regexp.Regexp
 	sqlInjectionPatterns []*regexp.Regexp

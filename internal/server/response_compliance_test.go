@@ -33,7 +33,10 @@ func auditLogger(t *testing.T) (*logging.Logger, string) {
 // a compliance manager that detects GDPR PII (SSN) and a per-type response policy.
 func newComplianceProxy(t *testing.T, logger *logging.Logger, policy map[string]string) *MCPProxy {
 	t.Helper()
+	// Bundle 5: the master switch is the single gate, so the helper sets
+	// it — these probes exercise compliance behavior with detection on.
 	comp := config.Compliance{
+		Enabled:        true,
 		GDPR:           config.GDPRConfig{Enabled: true, PIIDetection: true},
 		ResponsePolicy: policy,
 	}
@@ -201,8 +204,10 @@ func TestSummarizeComplianceViolations_PerTypeSeverity(t *testing.T) {
 // severity, which is exactly what the response-path log records. This proves the
 // data feeding summarizeComplianceViolations is real, not synthetic.
 func TestResponseComplianceSeverityFromSSN(t *testing.T) {
+	// Bundle 5: master switch gates compliance detection — opt in.
 	cm := sanitizer.NewComplianceManager(config.Compliance{
-		GDPR: config.GDPRConfig{Enabled: true, PIIDetection: true},
+		Enabled: true,
+		GDPR:    config.GDPRConfig{Enabled: true, PIIDetection: true},
 	}, testLogger())
 
 	res := cm.ScanForCompliance("Patient SSN on file: 123-45-6789, please verify.")

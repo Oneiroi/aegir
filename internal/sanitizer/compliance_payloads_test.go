@@ -159,7 +159,7 @@ func TestGDPRCompliancePayloads(t *testing.T) {
 
 				// Check for redaction markers
 				if !strings.Contains(result.Sanitized, "PII_REDACTED") &&
-				   !strings.Contains(result.Sanitized, "REDACTED") {
+					!strings.Contains(result.Sanitized, "REDACTED") {
 					t.Errorf("Expected redaction marker in: %s", tc.description)
 				}
 
@@ -302,7 +302,7 @@ func TestHIPAACompliancePayloads(t *testing.T) {
 
 				// Check for redaction markers
 				if !strings.Contains(result.Sanitized, "PHI_REDACTED") &&
-				   !strings.Contains(result.Sanitized, "REDACTED") {
+					!strings.Contains(result.Sanitized, "REDACTED") {
 					t.Errorf("Expected redaction marker in: %s", tc.description)
 				}
 
@@ -425,12 +425,16 @@ func TestPCIDSSCompliancePayloads(t *testing.T) {
 			"Complete cardholder data set",
 		},
 
-		// Invalid/test card numbers (should still be detected for safety)
+		// Test card numbers with an invalid Luhn checksum. Bundle 5 (F6
+		// posture, supervisor resolution 1): these log as low-severity
+		// pan_unvalidated findings and are intentionally NOT redacted — the
+		// old expectation (redact every card-formatted number) was the FP
+		// class being fixed. Real (Luhn-valid) cards above still redact.
 		{
 			"test_card_luhn_invalid",
 			"Test card: 4111-1111-1111-1112",
-			true,
-			"Invalid Luhn checksum (still sensitive format)",
+			false,
+			"Invalid Luhn checksum: logged, not redacted (bundle 5 posture)",
 		},
 
 		// Safe content with numbers
@@ -458,6 +462,19 @@ func TestPCIDSSCompliancePayloads(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			result := manager.ScanForCompliance(tc.payload)
 
+			// Bundle 5 posture (supervisor resolution 1): a card-formatted
+			// number with an invalid Luhn checksum is a log-only low finding
+			// — asserted here, not redacted, unlike the real cards above.
+			if tc.name == "test_card_luhn_invalid" {
+				if len(result.PCIDetections) == 0 {
+					t.Errorf("Expected a log-only (pan_unvalidated) PCI detection for: %s", tc.description)
+				}
+				if result.Sanitized != tc.payload {
+					t.Errorf("log-only content must stay unredacted for: %s, got %q", tc.description, result.Sanitized)
+				}
+				return
+			}
+
 			if tc.expectBlock {
 				if len(result.PCIDetections) == 0 && len(result.Violations) == 0 {
 					t.Errorf("Expected PCI DSS violation for: %s", tc.description)
@@ -470,9 +487,9 @@ func TestPCIDSSCompliancePayloads(t *testing.T) {
 
 				// Check for redaction markers
 				if !strings.Contains(result.Sanitized, "CARD_REDACTED") &&
-				   !strings.Contains(result.Sanitized, "CVV_REDACTED") &&
-				   !strings.Contains(result.Sanitized, "REDACTED") &&
-					   !strings.Contains(result.Sanitized, "XXXX-XXXX") {
+					!strings.Contains(result.Sanitized, "CVV_REDACTED") &&
+					!strings.Contains(result.Sanitized, "REDACTED") &&
+					!strings.Contains(result.Sanitized, "XXXX-XXXX") {
 					t.Errorf("Expected redaction marker in: %s", tc.description)
 				}
 
@@ -631,7 +648,11 @@ func TestPartialRedactionCoverage(t *testing.T) {
 }
 
 func createTestComplianceManager() *ComplianceManager {
+	// Bundle 5: the master switch gates all compliance detection, so the
+	// shared test helper opts in explicitly (these suites exercise the
+	// detectors, not the default-off posture).
 	cfg := config.Compliance{
+		Enabled: true,
 		GDPR: config.GDPRConfig{
 			Enabled:         true,
 			PIIDetection:    true,

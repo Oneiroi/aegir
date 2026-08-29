@@ -507,26 +507,55 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 		return
 	}
 
-	// Apply compliance filtering
-	complianceResult := p.complianceManager.ScanForCompliance(string(paramsJSON))
+	// Apply compliance filtering (bundle 5, C3: scan the sanitized
+	// working copy — post-sanitizer — so the compliance scan sees exactly
+	// what the judge and the upstream will see). Master off => identity,
+	// no violations, no action.
+	complianceResult := p.complianceManager.ScanForCompliance(sanitizationResult.Sanitized)
 
 	// Bridge compliance detections → dashboard counters
 	p.recordComplianceToContext(c, complianceResult)
 
-	if complianceResult.ComplianceRisk == "critical" || complianceResult.ComplianceRisk == "high" {
-		p.logger.Warn("MCP request blocked by compliance filter",
-			"method", req.Method,
-			"violations", len(complianceResult.Violations))
-
-		c.JSON(http.StatusForbidden, MCPResponse{
-			Error: &MCPError{
-				Code:    -32001,
-				Message: "Request blocked by compliance policy",
-				Data:    "Contains regulated data that cannot be processed",
+	// Resolve the action once, before the branches below, so the
+	// consolidated re-parse can honor it (policy fidelity, bundle 5 fix
+	// round).
+	complianceAction := ""
+	if len(complianceResult.Violations) > 0 {
+		// Audit FIRST (ISC-162 discipline): redacted per-type summary only,
+		// before any block/redact decision.
+		p.logger.LogSecurityEvent(&logging.SecurityEvent{
+			Type:      "request_compliance_violation",
+			Severity:  complianceResult.ComplianceRisk,
+			Message:   "Regulated data in request params",
+			Timestamp: time.Now(),
+			Details: map[string]string{
+				"method":     req.Method,
+				"violations": strconv.Itoa(len(complianceResult.Violations)),
+				"risk_level": complianceResult.ComplianceRisk,
+				"data_types": summarizeComplianceViolations(complianceResult.Violations),
 			},
-			ID: req.ID,
 		})
-		return
+
+		complianceAction = p.requestComplianceAction(complianceResult)
+		switch complianceAction {
+		case "block":
+			p.logger.Warn("MCP request blocked by compliance policy",
+				"method", req.Method,
+				"violations", len(complianceResult.Violations),
+				"action", "block")
+			c.JSON(http.StatusForbidden, MCPResponse{
+				Error: &MCPError{
+					Code:    -32001,
+					Message: "Request blocked by compliance policy",
+					Data:    "Contains regulated data that cannot be processed",
+				},
+				ID: req.ID,
+			})
+			return
+		case "redact":
+			// Applied via the consolidated re-parse below: the forwarded
+			// params become the compliance-redacted working copy (N3 fix).
+		}
 	}
 
 	// Additional URI validation for resources/read
@@ -551,27 +580,46 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 		}
 	}
 
-	// Sanitize the params if needed
+	// Consolidated param re-parse (bundle 5, N3): the forwarded content is
+	// the sanitizer working copy, plus — ONLY when the resolved action is
+	// redact — the compliance-redacted copy on top. Unmarshal failure
+	// (redaction corrupting the JSON structure) fails CLOSED: block the
+	// request — never 500, never forward unredacted/corrupt params.
+	// Policy fidelity: 'log-only' (or no violations) forwards the sanitizer
+	// working copy untouched, byte-identical — the request path honors
+	// request_policy exactly like the response path honors response_policy.
+	// Accepted simplification (documented per the F6 fix round): when the
+	// action is redact, the consolidated compliance-redacted copy forwards
+	// WHOLE — per-class selective redaction is out of scope for this bundle.
+	finalContent := string(paramsJSON)
 	if sanitizationResult.Sanitized != string(paramsJSON) {
-		var sanitizedParams interface{}
-		if err := json.Unmarshal([]byte(sanitizationResult.Sanitized), &sanitizedParams); err != nil {
+		finalContent = sanitizationResult.Sanitized
+	}
+	if complianceAction == "redact" &&
+		complianceResult != nil && complianceResult.Sanitized != sanitizationResult.Sanitized {
+		finalContent = complianceResult.Sanitized
+	}
+	if finalContent != string(paramsJSON) {
+		var forwarded map[string]interface{}
+		if err := json.Unmarshal([]byte(finalContent), &forwarded); err != nil {
 			p.logger.Error("Failed to parse sanitized params", "error", err)
-			c.JSON(http.StatusInternalServerError, MCPResponse{
+			c.JSON(http.StatusForbidden, MCPResponse{
 				Error: &MCPError{
-					Code:    -32603,
-					Message: "Internal error",
+					Code:    -32001,
+					Message: "Request blocked by compliance policy",
+					Data:    "Sanitized payload could not be re-encoded; request blocked",
 				},
 				ID: req.ID,
 			})
 			return
 		}
-		req.Params = sanitizedParams
+		req.Params = forwarded
 	}
 
 	// --- Judge Proxy Wiring (ISC-33, ISC-93) ---
 	// Skip entirely when judge is not configured (pattern-only mode).
 	if p.ruleEngine != nil {
-		judgePayload, _ := json.Marshal(req.Params)
+		judgePayload := []byte(marshalParamsOrContent(req.Params, string(paramsJSON)))
 		// Translate sanitizer verdict to a judge routing signal.
 		// ALLOW short-circuits the judge (no LLM call, zero latency).
 		// SUSPICIOUS routes the payload to the configured judge model.
@@ -863,12 +911,18 @@ func (p *MCPProxy) enforceResponseCompliance(responseJSON string, currentResult 
 			"action", "block")
 		return responseComplianceDecision{action: "block"}
 	case "redact":
-		// Enforce redaction on the raw response, then forward the masked payload.
+		// Bundle 5 (N2, note B): apply the ALREADY-COMPUTED compliance
+		// scan's redacted copy first (it carries the PII/PHI/PCI masks —
+		// the scan above ran on the raw payload for the audit event),
+		// then the generic sanitizer pass on top, then forward.
+		text := res.Sanitized
+		if redacted := p.sanitizer.SanitizeContent(text); redacted.Sanitized != text {
+			text = redacted.Sanitized
+		}
 		result := currentResult
-		redacted := p.sanitizer.SanitizeContent(responseJSON)
-		if redacted.Sanitized != responseJSON {
+		if text != responseJSON {
 			var redactedResult interface{}
-			if err := json.Unmarshal([]byte(redacted.Sanitized), &redactedResult); err == nil {
+			if err := json.Unmarshal([]byte(text), &redactedResult); err == nil {
 				result = redactedResult
 			}
 		}
@@ -1412,6 +1466,58 @@ func (p *MCPProxy) responseComplianceAction(violations []sanitizer.Violation) st
 		}
 	}
 	return best
+}
+
+// requestComplianceAction is the request-side per-class policy (bundle 5,
+// F6/N3): each violation's class maps to block/redact/log-only via
+// compliance.request_policy; unmapped classes fall back to severity
+// defaults (critical -> block, high -> redact, else log-only) and the
+// highest-priority action wins. FLOOR: any critical-severity violation
+// blocks the request regardless of the policy mapping (fail-closed).
+func (p *MCPProxy) requestComplianceAction(res *sanitizer.ComplianceResult) string {
+	if len(res.Violations) == 0 {
+		return "log-only"
+	}
+	priority := map[string]int{"block": 2, "redact": 1, "log-only": 0}
+	best := "log-only"
+	for _, v := range res.Violations {
+		action := "log-only"
+		switch v.Severity {
+		case "critical":
+			action = "block"
+		case "high":
+			action = "redact"
+		// medium/low findings (e.g. pan_unvalidated) stay log-only per the
+		// approved design matrix (C2).
+		}
+		// Global request_policy (keyed by class: pii/phi/pci). One policy
+		// surface only — there is deliberately no per-class map.
+		if pol := p.config.Compliance.RequestPolicy; pol != nil {
+			if a, ok := pol[v.Type]; ok {
+				action = a
+			}
+		}
+		// Fail-closed floor: a critical violation always blocks, even if
+		// the operator mapped its class to log-only.
+		if v.Severity == "critical" {
+			action = "block"
+		}
+		if priority[action] > priority[best] {
+			best = action
+		}
+	}
+	return best
+}
+
+// marshalParamsOrContent marshals req.Params, falling back to the given
+// content string if the params are not JSON-marshalable.
+func marshalParamsOrContent(params interface{}, fallback string) string {
+	if params != nil {
+		if b, err := json.Marshal(params); err == nil {
+			return string(b)
+		}
+	}
+	return fallback
 }
 
 // extractToolResultText pulls content[].text strings from an MCP tools/call result.

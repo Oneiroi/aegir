@@ -89,6 +89,9 @@ func New(cfg *config.Config) (*MCPFirewall, error) {
 
 	// Initialize compliance manager
 	complianceManager := sanitizer.NewComplianceManager(cfg.Compliance, logger)
+	if !cfg.Compliance.Enabled {
+		logger.Warn("Compliance detection (GDPR/HIPAA/PCI) is DISABLED - PII/PHI/PCI redaction will not run. Set compliance.enabled=true to enable.")
+	}
 
 	// Initialize encryption manager
 	encryptionManager, err := crypto.NewEncryptionManager(cfg.Security.Encryption, logger)
