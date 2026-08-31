@@ -56,6 +56,11 @@ go build -o bin/aegir ./cmd/server          # sandbox-disabled
 # mock upstream on :8080 (see bin/demo-flow-test.sh inline python), then:
 MCP_SERVER_PORT=18443 MCP_SERVER_TLS_ENABLED=false MCP_SECURITY_RATE_LIMIT_ENABLED=false \
   MCP_UPSTREAM_URL=http://127.0.0.1:8080 AEGIR_ALLOW_INSECURE_JWT_SECRET=true ./bin/aegir &
+# NOTE (bundle 6, F9): the env-var approach above was inert — the config loader
+# reads a --config file, and MCP_UPSTREAM_URL was never read by any loader path.
+# Reproduce with a temp config instead, e.g.:
+#   ./bin/aegir --config <cfg with server.port: 18443, tls.enabled: false,
+#               security.rate_limit.enabled: false, upstream url 127.0.0.1:8080>
 # login: POST /auth/login  admin + password from startup log line "Admin password (save this):"
 # benign "hello" tools/call -> 200; fire ~40 corpus adversarial payloads; benign "hello" -> 403 (wedged)
 ```

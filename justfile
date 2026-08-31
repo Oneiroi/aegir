@@ -45,8 +45,9 @@ judge-omlx-serve MODEL=JUDGE_MODEL:
 # HTTP mode so the SPIKEE/replay target (http://localhost:8443) can drive it.
 run-judge-omlx-qwen: build certs
     #!/usr/bin/env bash
+    # F9 (bundle 6): TLS-off comes from the --config file (tls.enabled: false);
+    # the old TLS_ENABLED / MCP_SERVER_TLS_ENABLED env vars were inert (viper#584).
     AEGIR_ALLOW_INSECURE_JWT_SECRET=true \
-    TLS_ENABLED=false MCP_SERVER_TLS_ENABLED=false \
     AEGIR_ADMIN_PASSWORD="${AEGIR_ADMIN_PASSWORD:-admin123}" \
     MCP_JUDGE_ENABLED=true \
     MCP_JUDGE_PROVIDER=openai \
@@ -77,7 +78,10 @@ dev-stdio:
 
 # TLS + rate-limiting disabled for quick testing
 demo: build
-    AEGIR_ALLOW_INSECURE_JWT_SECRET=true TLS_ENABLED=false RATE_LIMIT_ENABLED=false go run ./cmd/server
+    # F9 (bundle 6): the demo's TLS-off / rate-limit-off intent lives in
+    # config/aegir.demo.yaml — file values beat env vars (viper#584), so the
+    # old TLS_ENABLED/RATE_LIMIT_ENABLED env vars were silently inert.
+    AEGIR_ALLOW_INSECURE_JWT_SECRET=true go run ./cmd/server --config config/aegir.demo.yaml
 
 # Run all tests
 test:
@@ -189,14 +193,39 @@ generate-adversarial-example: build build-echo
     AEGIR_URL="http://127.0.0.1:${AEGIR_PORT}"
 
     pkill -f "bin/echo-server -addr :${UPSTREAM_PORT}" 2>/dev/null || true
-    pkill -f "MCP_SERVER_PORT=${AEGIR_PORT}" 2>/dev/null || true
+    pkill -f "bin/aegir --config" 2>/dev/null || true
 
     ./bin/echo-server -addr ":${UPSTREAM_PORT}" > "$LOGDIR/echo.log" 2>&1 &
     ECHO_PID=$!
-    AEGIR_ALLOW_INSECURE_JWT_SECRET=true MCP_SERVER_TLS_ENABLED=false \
-      MCP_SECURITY_RATE_LIMIT_ENABLED=false MCP_SERVER_PORT=${AEGIR_PORT} \
-      MCP_UPSTREAM_URL="http://127.0.0.1:${UPSTREAM_PORT}" \
-      ./bin/aegir > "$LOGDIR/aegir.log" 2>&1 &
+
+    # F9 (bundle 6): the config loader reads a --config file, not
+    # MCP_UPSTREAM_URL (that env var was never read — the recipe silently
+    # exercised the default upstream). Generate a temp config so the
+    # upstream URL, TLS-off, and rate-limit-off actually take effect.
+    AEGIR_CFG="$LOGDIR/aegir-rt.yaml"
+    cat > "$AEGIR_CFG" <<EOF
+server:
+  port: ${AEGIR_PORT}
+  host: "127.0.0.1"
+  tls:
+    enabled: false
+auth:
+  jwt:
+    secret: "adversarial-example-local-only-secret-32ch"
+security:
+  rate_limit:
+    enabled: false
+upstream:
+  services:
+    - name: "echo"
+      url: "http://127.0.0.1:${UPSTREAM_PORT}"
+      transport: "http"
+      enabled: true
+      timeout: 30
+EOF
+
+    AEGIR_ALLOW_INSECURE_JWT_SECRET=true \
+      ./bin/aegir --config "$AEGIR_CFG" > "$LOGDIR/aegir.log" 2>&1 &
     AEGIR_PID=$!
 
     cleanup() { kill "$ECHO_PID" "$AEGIR_PID" 2>/dev/null || true; }

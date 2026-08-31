@@ -142,7 +142,7 @@ func NewMCPProxy(cfg *config.Config, logger *logging.Logger, sanitizerMgr *sanit
 			},
 		},
 		reconCalls:    make(map[string][]time.Time),
-		metaInspector: meta.NewInspector(nil, false), // Default: strip unknown keys
+		metaInspector: newMetaInspector(cfg), // F7 (bundle 6): config-driven
 		taskRegistry:  newTaskRegistry(cfg),
 		replayCache:   protocolguard.NewReplayCache(time.Duration(cfg.Security.ReplayProtection.TTLSeconds) * time.Second),
 		stateSigner:   newStateSigner(cfg),
@@ -150,6 +150,27 @@ func NewMCPProxy(cfg *config.Config, logger *logging.Logger, sanitizerMgr *sanit
 		toolMetaScanner:     toolmeta.NewScanner(),
 		toolIdentityChecker: toolidentity.NewChecker(newToolIdentityCheckerConfig(cfg)),
 	}
+}
+
+// newMetaInspector builds the params._meta inspector from config (F7,
+// bundle 6). Enabled=false bypasses inspection entirely (identity); an empty
+// AllowedKeys list falls back to the inspector's built-in default set (spec
+// keys included); RejectUnknown=true makes unknown keys a 403 instead of a
+// silent strip (fail-closed posture preserved: default is strip).
+func newMetaInspector(cfg *config.Config) *meta.Inspector {
+	mi := cfg.Security.MetaInspection
+	if !mi.Enabled {
+		// Bypass: inspection disabled — params pass through unmodified.
+		return &meta.Inspector{Bypass: true}
+	}
+	var allowed map[string]bool
+	if len(mi.AllowedKeys) > 0 {
+		allowed = make(map[string]bool, len(mi.AllowedKeys))
+		for _, k := range mi.AllowedKeys {
+			allowed[k] = true
+		}
+	}
+	return meta.NewInspector(allowed, mi.RejectUnknown)
 }
 
 // newToolIdentityCheckerConfig builds the toolidentity.CheckerConfig from
@@ -2557,20 +2578,15 @@ func (p *MCPProxy) sidRotationHonor(c *gin.Context, sid, sharedKey string) bool 
 // It honours the client-supplied X-Session-ID header when present so that
 // multi-turn / SPIKEE replay sessions are isolated per-session rather than
 // collapsing all traffic from the same user/IP into one SessionContext.
-// The header value is treated as an opaque identifier and sanitized.
+// The header is the single source (N4, bundle 6): the value is treated as
+// an opaque identifier and sanitized. The header is never forwarded
+// upstream, so a JWT-shaped ID is a gateway-internal label, not a leaked
+// credential.
 func (p *MCPProxy) getSessionID(c *gin.Context) string {
 	// F4b (bundle 3): client-influenced session IDs are rate-limited per
 	// non-client-controlled identity. Beyond the rotation limit the
 	// identity degrades to the shared key below; this never blocks.
 	sharedKey := p.sessionIDFromFallback(c)
-	if sessionID, exists := c.Get("session_id"); exists {
-		if sid, ok := sessionID.(string); ok && sid != "" {
-			if p.sidRotationHonor(c, sid, sharedKey) {
-				return sid
-			}
-			return sharedKey
-		}
-	}
 	if headerSID := c.GetHeader("X-Session-ID"); headerSID != "" {
 		sid := sanitizeSessionID(headerSID)
 		if p.sidRotationHonor(c, sid, sharedKey) {
@@ -2583,9 +2599,12 @@ func (p *MCPProxy) getSessionID(c *gin.Context) string {
 
 // sanitizeSessionID clamps a client-supplied session identifier to a safe
 // length and strips non-printable/control characters. The value is treated
-// as an opaque identifier, not a trust signal.
+// as an opaque identifier, not a trust signal. The 512-char clamp (N4,
+// bundle 6: raised from 128) fits real JWT-shaped session IDs (typically
+// 200-400 chars) so the client's identity is not mangled, while still
+// bounding header-size abuse.
 func sanitizeSessionID(s string) string {
-	const maxLen = 128
+	const maxLen = 512
 	if len(s) > maxLen {
 		s = s[:maxLen]
 	}

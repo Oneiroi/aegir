@@ -14,17 +14,26 @@ type Inspector struct {
 	AllowedKeys map[string]bool
 	// RejectUnknown controls whether unknown keys cause rejection (true) or stripping (false).
 	RejectUnknown bool
+	// Bypass disables inspection entirely: params pass through unmodified.
+	// Set when security.meta_inspection.enabled is false (F7, bundle 6).
+	Bypass bool
 }
 
 // NewInspector creates a new Inspector with the given configuration.
 func NewInspector(allowedKeys map[string]bool, rejectUnknown bool) *Inspector {
 	if allowedKeys == nil {
+		// Default allowlist: observability keys plus the MCP spec's own
+		// _meta keys (F7, bundle 6). progressToken (2025-03-26) and
+		// requestState (2025-06-18) are spec-conformant and must not be
+		// silently stripped from spec clients.
 		allowedKeys = map[string]bool{
 			"trace_id":       true,
 			"span_id":        true,
 			"correlation_id": true,
 			"source":         true,
 			"intent":         true,
+			"progressToken":  true,
+			"requestState":   true,
 		}
 	}
 	return &Inspector{
@@ -37,6 +46,9 @@ func NewInspector(allowedKeys map[string]bool, rejectUnknown bool) *Inspector {
 // Returns the sanitized _meta (with unknown keys removed or nil if rejected),
 // and a boolean indicating if the request should be allowed.
 func (i *Inspector) Inspect(params json.RawMessage) (json.RawMessage, bool) {
+	if i.Bypass {
+		return params, true // control disabled: identity, never reject
+	}
 	if len(params) == 0 {
 		return nil, true // No params, allow
 	}

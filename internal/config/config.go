@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -221,6 +220,11 @@ type Security struct {
 	// (description drift), ISC-108 (name collision), ISC-115 (full schema
 	// poisoning), ISC-116 (typosquatting/name confusion). Disabled by default.
 	ToolMetadataInspection ToolMetadataInspectionConfig `json:"tool_metadata_inspection" mapstructure:"tool_metadata_inspection"`
+	// MetaInspection configures the params._meta inspector (F7, bundle 6).
+	// Enabled (default true) runs the inspector on every request; AllowedKeys
+	// overrides the default allowlist; RejectUnknown (default false = strip)
+	// makes unknown keys a 403 instead of a silent strip.
+	MetaInspection MetaInspectionConfig `json:"meta_inspection" mapstructure:"meta_inspection"`
 	// StateSigningKey HMAC-signs resumable state/task-ID tokens the gateway
 	// issues (ISC-175/176) so a client can never forge or tamper with one.
 	// When empty, a random per-process key is generated at startup — tokens
@@ -254,6 +258,21 @@ type ToolMetadataInspectionConfig struct {
 	// TrustedNameAllowlist lists tool names ISC-116 protects against
 	// near-match confusion. Empty by default — operators opt in per tool name.
 	TrustedNameAllowlist []string `json:"trusted_name_allowlist" mapstructure:"trusted_name_allowlist"`
+}
+
+// MetaInspectionConfig configures the params._meta inspector (F7, bundle 6).
+type MetaInspectionConfig struct {
+	// Enabled runs the inspector. Default true — the control is always on;
+	// operators opt out explicitly (a startup WARN fires when disabled).
+	Enabled bool `json:"enabled" mapstructure:"enabled"`
+	// AllowedKeys overrides the default _meta allowlist (trace_id, span_id,
+	// correlation_id, source, intent, progressToken, requestState). Empty
+	// list => the inspector's built-in default set.
+	AllowedKeys []string `json:"allowed_keys" mapstructure:"allowed_keys"`
+	// RejectUnknown turns unknown _meta keys into a 403 block instead of a
+	// silent strip. Default false (strip) — the fail-safe posture; reject is
+	// an opt-in strictness knob (a startup WARN fires when enabled).
+	RejectUnknown bool `json:"reject_unknown" mapstructure:"reject_unknown"`
 }
 
 // OAuthScopeAuditConfig configures JWT scope auditing and enforcement (ISC-122).
@@ -593,9 +612,14 @@ func LoadWithConfigFile(configFile string) (*Config, error) {
 		}
 	}
 
-	// Enable environment variable support
+	// Enable environment variable support.
+	// NOTE (F9, bundle 6): AutomaticEnv does NOT influence Unmarshal
+	// (viper#584, confirmed in v1.21.0) — it only affects v.Get() resolution.
+	// The env vars that reliably take effect are the ones explicitly handled
+	// in applyDirectEnvOverrides / bindJudgeEnv below; the --config file is
+	// the primary configuration surface (see .env.example for the live list).
 	v.AutomaticEnv()
-	v.SetEnvPrefix("MCP") // MCP_SERVER_PORT, etc.
+	v.SetEnvPrefix("MCP") // MCP_SERVER_PORT, etc. (v.Get resolution only)
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 
 	// Explicit BindEnv for runtime-critical keys: Viper's Unmarshal does not
@@ -658,9 +682,14 @@ func LoadWithConfigDir(configDir string) (*Config, error) {
 		v.SetConfigType("toml")
 	}
 
-	// Enable environment variable support
+	// Enable environment variable support.
+	// NOTE (F9, bundle 6): AutomaticEnv does NOT influence Unmarshal
+	// (viper#584, confirmed in v1.21.0) — it only affects v.Get() resolution.
+	// The env vars that reliably take effect are the ones explicitly handled
+	// in applyDirectEnvOverrides / bindJudgeEnv below; the --config file is
+	// the primary configuration surface (see .env.example for the live list).
 	v.AutomaticEnv()
-	v.SetEnvPrefix("MCP") // MCP_SERVER_PORT, etc.
+	v.SetEnvPrefix("MCP") // MCP_SERVER_PORT, etc. (v.Get resolution only)
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 
 	// Explicit BindEnv for runtime-critical keys: Viper's Unmarshal does not
@@ -848,6 +877,13 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("security.tool_metadata_inspection.confusion_threshold", 2)
 	v.SetDefault("security.tool_metadata_inspection.trusted_name_allowlist", []string{})
 
+	// Meta inspector defaults (F7, bundle 6): the control is ON by default
+	// (strip unknown _meta keys); the allowlist default is the inspector's
+	// built-in set (spec keys included); reject is opt-in.
+	v.SetDefault("security.meta_inspection.enabled", true)
+	v.SetDefault("security.meta_inspection.allowed_keys", []string{})
+	v.SetDefault("security.meta_inspection.reject_unknown", false)
+
 	// Human approval gate defaults (ISC-119): disabled by default; common destructive prefixes.
 	v.SetDefault("security.human_approval.enabled", false)
 	v.SetDefault("security.human_approval.patterns", []string{"delete_", "drop_", "purge_", "format_", "overwrite_"})
@@ -961,230 +997,6 @@ func applyComplianceMasterDefaults(v *viper.Viper) {
 			v.SetDefault(key, val)
 		}
 	}
-}
-
-// LoadLegacy loads configuration from environment variables and defaults (legacy method)
-func LoadLegacy() (*Config, error) {
-	cfg := &Config{
-		Environment: getEnv("MCP_ENV", "development"),
-		Server: Server{
-			Port:         getEnvAsInt("PORT", 8443),
-			Host:         getEnv("HOST", "localhost"),
-			ReadTimeout:  getEnvAsInt("READ_TIMEOUT", 10),
-			WriteTimeout: getEnvAsInt("WRITE_TIMEOUT", 10),
-			TLS: TLS{
-				Enabled:  getEnvAsBool("TLS_ENABLED", true),
-				CertFile: getEnv("TLS_CERT_FILE", "certs/cert.pem"),
-				KeyFile:  getEnv("TLS_KEY_FILE", "certs/key.pem"),
-				MinTLS:   getEnv("TLS_MIN_VERSION", "1.3"),
-			},
-		},
-		Auth: Auth{
-			JWT: JWT{
-				Secret:            getEnv("JWT_SECRET", generateRandomSecret()),
-				Issuer:            getEnv("JWT_ISSUER", "aegir"),
-				ExpirationTime:    time.Duration(getEnvAsInt("JWT_EXPIRATION", 3600)) * time.Second,
-				RefreshExpiration: time.Duration(getEnvAsInt("JWT_REFRESH_EXPIRATION", 86400)) * time.Second,
-			},
-			OAuth: OAuth{
-				Enabled:      getEnvAsBool("OAUTH_ENABLED", false),
-				ClientID:     getEnv("OAUTH_CLIENT_ID", ""),
-				ClientSecret: getEnv("OAUTH_CLIENT_SECRET", ""),
-				RedirectURL:  getEnv("OAUTH_REDIRECT_URL", ""),
-				AuthURL:      getEnv("OAUTH_AUTH_URL", ""),
-				TokenURL:     getEnv("OAUTH_TOKEN_URL", ""),
-			},
-			APIKeys: APIKeys{
-				Enabled: getEnvAsBool("API_KEYS_ENABLED", true),
-			},
-			MFA: MFA{
-				Required:  getEnvAsBool("MFA_REQUIRED", false),
-				Providers: []string{"totp", "sms"},
-			},
-		},
-		Logging: Logging{
-			Level:           getEnv("LOG_LEVEL", "info"),
-			Format:          getEnv("LOG_FORMAT", "json"),
-			File:            getEnv("LOG_FILE", "logs/aegir.log"),
-			MaxSize:         getEnvAsInt("LOG_MAX_SIZE", 100),
-			MaxBackups:      getEnvAsInt("LOG_MAX_BACKUPS", 10),
-			MaxAge:          getEnvAsInt("LOG_MAX_AGE", 30),
-			Compress:        getEnvAsBool("LOG_COMPRESS", true),
-			HMACKey:         getEnv("LOG_HMAC_KEY", generateRandomSecret()),
-			IntegrityChecks: getEnvAsBool("LOG_INTEGRITY_CHECKS", true),
-		},
-		Telemetry: Telemetry{
-			Enabled:     getEnvAsBool("OTEL_ENABLED", false),
-			OutputDir:   getEnv("OTEL_OUTPUT_DIR", "logs/traces"),
-			ServiceName: getEnv("OTEL_SERVICE_NAME", "aegir-mcp-firewall"),
-			SampleRate:  getEnvAsFloat("OTEL_SAMPLE_RATE", 1.0),
-		},
-		Security: Security{
-			RateLimit: RateLimit{
-				Enabled:         getEnvAsBool("RATE_LIMIT_ENABLED", true),
-				RequestsPerMin:  getEnvAsInt("RATE_LIMIT_RPM", 100),
-				BurstSize:       getEnvAsInt("RATE_LIMIT_BURST", 20),
-				CleanupInterval: getEnvAsInt("RATE_LIMIT_CLEANUP", 300),
-				MaxTrackedIPs:   getEnvAsInt("RATE_LIMIT_MAX_TRACKED_IPS", 100000),
-			},
-			Detection: Detection{
-				Enabled:        getEnvAsBool("DETECTION_ENABLED", true),
-				ResponsePolicy: getEnv("DETECTION_RESPONSE_POLICY", "block"),
-			},
-			Sanitization: Sanitization{
-				Enabled:          getEnvAsBool("SANITIZATION_ENABLED", true),
-				XSSPrevention:    getEnvAsBool("XSS_PREVENTION", true),
-				SQLInjection:     getEnvAsBool("SQL_INJECTION_PREVENTION", true),
-				HomoglyphFilter:  getEnvAsBool("HOMOGLYPH_FILTER", true),
-				FormulaDetection: getEnvAsBool("FORMULA_DETECTION", true),
-				PromptInjection:  getEnvAsBool("PROMPT_INJECTION_PREVENTION", true),
-			},
-			Encryption: Encryption{
-				Algorithm:   getEnv("ENCRYPTION_ALGORITHM", "AES-256-GCM"),
-				KeySize:     getEnvAsInt("ENCRYPTION_KEY_SIZE", 256),
-				KeyRotation: getEnvAsInt("KEY_ROTATION_DAYS", 90),
-				HardwareHSM: getEnvAsBool("HARDWARE_HSM", false),
-				CloudKMS:    getEnv("CLOUD_KMS", ""),
-			},
-			SecretDetection: SecretDetection{
-				Enabled:      getEnvAsBool("SECRET_DETECTION_ENABLED", true),
-				APIKeys:      getEnvAsBool("DETECT_API_KEYS", true),
-				SSHKeys:      getEnvAsBool("DETECT_SSH_KEYS", true),
-				Certificates: getEnvAsBool("DETECT_CERTIFICATES", true),
-				Passwords:    getEnvAsBool("DETECT_PASSWORDS", true),
-			},
-			CommandInjection: CommandInjection{
-				Enabled:    getEnvAsBool("COMMAND_INJECTION_PREVENTION", true),
-				StrictMode: getEnvAsBool("COMMAND_INJECTION_STRICT", true),
-			},
-		},
-		Compliance: func() Compliance {
-			// Bundle 5: class/sub defaults follow the master switch so an
-			// unset flag is enabled when (and only when) the master is on.
-			master := getEnvAsBool("COMPLIANCE_ENABLED", false)
-			return Compliance{
-				Enabled: master,
-				HIPAA: HIPAAConfig{
-					Enabled:      getEnvAsBool("HIPAA_ENABLED", master),
-					PHIDetection: getEnvAsBool("PHI_DETECTION", master),
-					Encryption:   getEnvAsBool("HIPAA_ENCRYPTION", false),
-					AuditTrail:   getEnvAsBool("HIPAA_AUDIT", false),
-				},
-				PCI: PCIConfig{
-					Enabled:        getEnvAsBool("PCI_ENABLED", master),
-					CardDetection:  getEnvAsBool("CARD_DETECTION", master),
-					TokenizeCards:  getEnvAsBool("TOKENIZE_CARDS", false),
-					EncryptStorage: getEnvAsBool("PCI_ENCRYPT_STORAGE", false),
-				},
-				GDPR: GDPRConfig{
-					Enabled:         getEnvAsBool("GDPR_ENABLED", master),
-					PIIDetection:    getEnvAsBool("PII_DETECTION", master),
-					RightToErasure:  getEnvAsBool("RIGHT_TO_ERASURE", false),
-					DataPortability: getEnvAsBool("DATA_PORTABILITY", false),
-					ConsentTracking: getEnvAsBool("CONSENT_TRACKING", false),
-					Region:          getEnv("GDPR_REGION", "EU"),
-				},
-				SOC2: SOC2Config{
-					Enabled: getEnvAsBool("SOC2_ENABLED", false),
-					Type2:   getEnvAsBool("SOC2_TYPE2", false),
-				},
-			}
-		}(),
-		SessionAnalysis: SessionAnalysis{
-			Enabled:                  getEnvAsBool("SESSION_ANALYSIS_ENABLED", true),
-			MaxSessionAge:            time.Duration(getEnvAsInt("SESSION_MAX_AGE_MINUTES", 30)) * time.Minute,
-			MaxHistorySize:           getEnvAsInt("SESSION_MAX_HISTORY_SIZE", 50),
-			ThreatThreshold:          getEnvAsFloat("SESSION_THREAT_THRESHOLD", 0.5),
-			CleanupInterval:          time.Duration(getEnvAsInt("SESSION_CLEANUP_MINUTES", 5)) * time.Minute,
-			JailbreakThreshold:       getEnvAsFloat("SESSION_JAILBREAK_THRESHOLD", 0.6),
-			RoleEscalationLimit:      getEnvAsInt("SESSION_ROLE_ESCALATION_LIMIT", 3),
-			EmotionalManipThreshold:  getEnvAsFloat("SESSION_EMOTIONAL_MANIP_THRESHOLD", 0.4),
-			AnomalyEWMADecayHalfLife: time.Duration(getEnvAsInt("SESSION_ANOMALY_EWMA_DECAY_HALF_LIFE_MINUTES", 5)) * time.Minute,
-		},
-		Upstream: Upstream{
-			Services: []UpstreamService{
-				{
-					Name:      getEnv("UPSTREAM_SERVICE_NAME", "default-mcp-service"),
-					URL:       getEnv("UPSTREAM_SERVICE_URL", "http://localhost:8080"),
-					Transport: getEnv("UPSTREAM_TRANSPORT", "http"),
-					Weight:    getEnvAsInt("UPSTREAM_WEIGHT", 100),
-					Priority:  getEnvAsInt("UPSTREAM_PRIORITY", 1),
-					Enabled:   getEnvAsBool("UPSTREAM_ENABLED", true),
-					Timeout:   getEnvAsInt("UPSTREAM_TIMEOUT", 30),
-					TLS: UpstreamTLS{
-						Enabled:    getEnvAsBool("UPSTREAM_TLS_ENABLED", false),
-						SkipVerify: getEnvAsBool("UPSTREAM_TLS_SKIP_VERIFY", false),
-					},
-				},
-			},
-			Discovery: Discovery{
-				Enabled:  getEnvAsBool("DISCOVERY_ENABLED", false),
-				Provider: getEnv("DISCOVERY_PROVIDER", "static"),
-				Interval: getEnvAsInt("DISCOVERY_INTERVAL", 30),
-			},
-			LoadBalancing: LoadBalancing{
-				Strategy: getEnv("LOAD_BALANCING_STRATEGY", "round_robin"),
-			},
-			HealthCheck: HealthCheck{
-				Enabled:            getEnvAsBool("HEALTH_CHECK_ENABLED", true),
-				Interval:           getEnvAsInt("HEALTH_CHECK_INTERVAL", 30),
-				Timeout:            getEnvAsInt("HEALTH_CHECK_TIMEOUT", 5),
-				HealthyThreshold:   getEnvAsInt("HEALTH_CHECK_HEALTHY_THRESHOLD", 2),
-				UnhealthyThreshold: getEnvAsInt("HEALTH_CHECK_UNHEALTHY_THRESHOLD", 3),
-				Path:               getEnv("HEALTH_CHECK_PATH", "/health"),
-				ExpectedCodes:      []int{200, 204},
-			},
-			CircuitBreaker: CircuitBreaker{
-				Enabled:          getEnvAsBool("CIRCUIT_BREAKER_ENABLED", true),
-				FailureThreshold: getEnvAsInt("CIRCUIT_BREAKER_FAILURE_THRESHOLD", 5),
-				RecoveryTimeout:  getEnvAsInt("CIRCUIT_BREAKER_RECOVERY_TIMEOUT", 60),
-				HalfOpenRequests: getEnvAsInt("CIRCUIT_BREAKER_HALF_OPEN_REQUESTS", 3),
-			},
-			Retry: RetryConfig{
-				Enabled:      getEnvAsBool("RETRY_ENABLED", true),
-				MaxRetries:   getEnvAsInt("RETRY_MAX_RETRIES", 3),
-				BackoffMs:    getEnvAsInt("RETRY_BACKOFF_MS", 100),
-				MaxBackoffMs: getEnvAsInt("RETRY_MAX_BACKOFF_MS", 1000),
-			},
-		},
-	}
-
-	return cfg, nil
-}
-
-// Helper functions for environment variable parsing
-func getEnv(key, fallback string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return fallback
-}
-
-func getEnvAsInt(key string, fallback int) int {
-	if value := os.Getenv(key); value != "" {
-		if intVal, err := strconv.Atoi(value); err == nil {
-			return intVal
-		}
-	}
-	return fallback
-}
-
-func getEnvAsBool(key string, fallback bool) bool {
-	if value := os.Getenv(key); value != "" {
-		if boolVal, err := strconv.ParseBool(value); err == nil {
-			return boolVal
-		}
-	}
-	return fallback
-}
-
-func getEnvAsFloat(key string, fallback float64) float64 {
-	if value := os.Getenv(key); value != "" {
-		if floatVal, err := strconv.ParseFloat(value, 64); err == nil {
-			return floatVal
-		}
-	}
-	return fallback
 }
 
 // devSecret is generated once per process so that restarts within a single

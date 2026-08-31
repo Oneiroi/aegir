@@ -1,0 +1,47 @@
+# Aegir demo configuration — TLS off, rate limiting off, quick local test.
+# Used by `just demo` (F9, bundle 6): the config loader reads a --config file,
+# and file values beat env vars (viper#584), so the demo's "TLS off /
+# rate-limit off" intent lives here instead of in env vars.
+#
+# The JWT secret below is a dev placeholder; `just demo` sets
+# AEGIR_ALLOW_INSECURE_JWT_SECRET=true to opt past the production guard.
+
+environment: development
+
+server:
+  port: 8443
+  host: localhost
+  tls:
+    enabled: false
+
+auth:
+  jwt:
+    secret: "simple-dev-key-change-for-production"
+    issuer: "aegir"
+  api_keys:
+    enabled: true
+
+logging:
+  level: info
+  format: text
+  hmac_key: "development-hmac-key-that-is-definitely-32-characters-long"
+
+security:
+  detection:
+    enabled: true
+    response_policy: block
+  sanitization:
+    enabled: true
+    prompt_injection: true
+  rate_limit:
+    enabled: false
+
+judge:
+  enabled: false
+
+upstream:
+  services:
+    - name: local-mcp-service
+      url: http://localhost:8080
+      enabled: true
+      timeout: 30

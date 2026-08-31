@@ -19,13 +19,24 @@ func TestTransportModeSelection(t *testing.T) {
 	// production secret guard (CheckProductionSecrets) doesn't block startup.
 	t.Setenv("AEGIR_ALLOW_INSECURE_JWT_SECRET", "true")
 
-	// Test data for different transport modes
+	// F9 (bundle 6): build the binary ONCE before the table (was 4x `go
+	// build`), and per subtest Start() + poll the log stream against a
+	// deadline instead of a fixed 3s kill — the TestGracefulShutdown pattern.
+	// A fixed window races startup under full-suite CPU contention (the
+	// child is SIGKILLed before the startup line is written, and the
+	// post-hoc assertion fails with empty stderr).
+	build := exec.Command("go", "build", "-o", "test-aegir", ".")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("Failed to build test binary: %v: %s", err, out)
+	}
+	defer os.Remove("./test-aegir")
+
 	tests := []struct {
-		name            string
-		transport       string
-		expectError     bool
-		errorContains   string
-		expectedOutput  string
+		name           string
+		transport      string
+		expectError    bool
+		errorContains  string
+		expectedOutput string
 	}{
 		{
 			name:           "HTTP mode",
@@ -55,57 +66,73 @@ func TestTransportModeSelection(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Build the binary for testing
-			cmd := exec.Command("go", "build", "-o", "test-aegir", ".")
-			if err := cmd.Run(); err != nil {
-				t.Fatalf("Failed to build test binary: %v", err)
-			}
-			defer os.Remove("./test-aegir")
-
-			// Prepare command with transport flag
-			args := []string{"./test-aegir", "-transport", tt.transport}
-
-			// For STDIO mode, provide input to prevent hanging
-			var stdin *bytes.Buffer
+			testCmd := exec.Command("./test-aegir", "-transport", tt.transport)
+			// For STDIO mode, provide input so the handler produces a
+			// response and the process can exit on its own.
 			if tt.transport == "stdio" {
-				stdin = bytes.NewBufferString(`{"method":"initialize","params":{"protocolVersion":"2025-06-18"},"id":"1"}`)
+				testCmd.Stdin = bytes.NewBufferString(`{"method":"initialize","params":{"protocolVersion":"2025-06-18"},"id":"1"}`)
 			}
 
-			// Create context with timeout to prevent hanging
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
+			stdout := &syncBuffer{}
+			stderr := &syncBuffer{}
+			testCmd.Stdout = stdout
+			testCmd.Stderr = stderr
 
-			testCmd := exec.CommandContext(ctx, args[0], args[1:]...)
-			if stdin != nil {
-				testCmd.Stdin = stdin
+			if err := testCmd.Start(); err != nil {
+				t.Fatalf("Failed to start test binary: %v", err)
 			}
 
-			var stdout, stderr bytes.Buffer
-			testCmd.Stdout = &stdout
-			testCmd.Stderr = &stderr
-
-			// Run the command
-			_ = testCmd.Run()
-
+			// Poll for the expected line against a deadline (route
+			// registration + init routinely take longer than a fixed sleep
+			// on a loaded host). The invalid-mode process exits fast on its
+			// own; the deadline is a backstop, not the mechanism.
+			needle := tt.expectedOutput
 			if tt.expectError {
-				// For error cases, check stderr for expected error message
-				stderrStr := stderr.String()
-				if !strings.Contains(stderrStr, tt.errorContains) {
-					t.Errorf("Expected error containing '%s', got stderr: %s", tt.errorContains, stderrStr)
+				needle = tt.errorContains
+			}
+			deadline := time.Now().Add(15 * time.Second)
+			found := false
+			for time.Now().Before(deadline) {
+				if strings.Contains(stderr.String(), needle) || strings.Contains(stdout.String(), needle) {
+					found = true
+					break
 				}
-			} else {
-				// For success cases, check if the expected output appears in stderr (where logs go)
-				stderrStr := stderr.String()
-				if !strings.Contains(stderrStr, tt.expectedOutput) {
-					t.Errorf("Expected output containing '%s', got stderr: %s", tt.expectedOutput, stderrStr)
+				// Process already exited without the line: no point polling.
+				if testCmd.ProcessState != nil && testCmd.ProcessState.Exited() {
+					break
 				}
+				time.Sleep(50 * time.Millisecond)
+			}
+			if !found {
+				_ = testCmd.Process.Kill()
+				_, _ = testCmd.Process.Wait()
+				t.Fatalf("expected %q in output, got stderr:\n%s\nstdout:\n%s",
+					needle, stderr.String(), stdout.String())
+			}
 
-				// For STDIO mode, also check stdout for the response
+			// Success cases: the server keeps running — kill it once the
+			// expected output is confirmed. STDIO additionally needs the
+			// handler's response on stdout; the startup line is logged before
+			// the handler runs, so poll for the response (not a fixed sleep —
+			// that is the race this rewrite removes) before killing.
+			if !tt.expectError {
 				if tt.transport == "stdio" {
-					stdoutStr := stdout.String()
-					if !strings.Contains(stdoutStr, `"protocolVersion":"2025-06-18"`) {
-						t.Errorf("Expected MCP response in stdout, got: %s", stdoutStr)
+					rd := time.Now().Add(10 * time.Second)
+					for !strings.Contains(stdout.String(), `"protocolVersion":"2025-06-18"`) {
+						if time.Now().After(rd) {
+							break
+						}
+						time.Sleep(25 * time.Millisecond)
 					}
+				}
+				_ = testCmd.Process.Kill()
+			}
+			_, _ = testCmd.Process.Wait()
+
+			if tt.transport == "stdio" {
+				stdoutStr := stdout.String()
+				if !strings.Contains(stdoutStr, `"protocolVersion":"2025-06-18"`) {
+					t.Errorf("Expected MCP response in stdout, got: %s", stdoutStr)
 				}
 			}
 		})
@@ -170,7 +197,7 @@ func TestEnvironmentVariableHandling(t *testing.T) {
 		{
 			name: "Production environment",
 			envVars: map[string]string{
-				"MCP_ENV":        "production",
+				"MCP_ENV":         "production",
 				"MCP_SERVER_PORT": "9443",
 			},
 			expectError: false,
@@ -198,7 +225,7 @@ func TestEnvironmentVariableHandling(t *testing.T) {
 
 			// Run with STDIO mode and immediate input to cause quick exit
 			testCmd := exec.CommandContext(ctx, "./test-aegir-env", "-transport", "stdio")
-			testCmd.Stdin = strings.NewReader("")  // Empty input causes EOF and exit
+			testCmd.Stdin = strings.NewReader("") // Empty input causes EOF and exit
 
 			var stderr bytes.Buffer
 			testCmd.Stderr = &stderr

@@ -23,8 +23,19 @@ var headerScanSkipList = map[string]bool{
 	"accept-encoding": true,
 	"accept-language": true,
 	"connection":      true,
-	"mcp-method":      true, // handled by the ISC-166 desync guard
-	"mcp-name":        true,
+	// referer (F9, bundle 6): standard browser header that legitimately
+	// carries a URL on every navigation. It is not a secret channel, so
+	// scanning it false-positives on the URL's credential-shaped substrings.
+	"referer":    true,
+	"mcp-method": true, // handled by the ISC-166 desync guard
+	"mcp-name":   true,
+	// x-session-id (N4, bundle 6): protocol identifier header. It carries a
+	// client-chosen session ID that has its own sanitization path
+	// (sanitizeSessionID: length clamp + control-char strip) and is never
+	// forwarded upstream (upstream/manager.go sets only Content-Type and
+	// User-Agent). Secret-scanning it false-positives on JWT-shaped session
+	// IDs (the jwt_header pattern) and blocks legitimate clients.
+	"x-session-id": true,
 }
 
 // xMCPHeaderPrefix matches the MCP 2026-07-28 `x-mcp-header` directive: clients/

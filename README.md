@@ -155,6 +155,28 @@ Full scope boundary with machine-readable coverage map: [`SCOPE.md`](SCOPE.md) a
 
 ---
 
+## API error contract
+
+The `/mcp` endpoint returns a consistent HTTP status + JSON-RPC error code per
+class of failure (F8, bundle 6). Clients monitoring status codes see every
+block as a 4xx — no block is hidden behind a 200.
+
+| Condition | HTTP | MCP error code | Example |
+|---|---|---|---|
+| Security block (sanitizer, judge, SSRF-arg, header credential, meta-inspect reject, approval gate, session latch) | 403 | `-32000` | "Request blocked by security policy" |
+| Compliance block / redaction write-back corruption (fail-closed) | 403 | `-32001` | "Request blocked by compliance policy" |
+| Rate limit / async-task quota exceeded | 429 | `-32000` | "Rate limit exceeded" |
+| Malformed request (bad JSON, bad params, header/body desync) | 400 | `-32600` / `-32602` | "Invalid params" |
+| Upstream configured but unreachable (fail-closed) | 502 | `-32000` | "upstream unavailable" |
+| Internal error | 500 | `-32603` | "Internal error" |
+| Success (including redacted results) | 200 | — (result object) | tool result |
+| Unknown method, standalone mode (no upstreams) | 200 | `-32601` | "Method not found" (JSON-RPC contract: method errors ride 200) |
+
+Regression coverage: `internal/server/status_contract_test.go` asserts the
+status+code pair per gate.
+
+---
+
 ## Roadmap
 
 | Milestone | Focus | Status |

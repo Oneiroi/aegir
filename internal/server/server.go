@@ -92,6 +92,14 @@ func New(cfg *config.Config) (*MCPFirewall, error) {
 	if !cfg.Compliance.Enabled {
 		logger.Warn("Compliance detection (GDPR/HIPAA/PCI) is DISABLED - PII/PHI/PCI redaction will not run. Set compliance.enabled=true to enable.")
 	}
+	// F7 (bundle 6): operator-relevant meta-inspection states. Both fire at
+	// the composition root where the inspector is built from config.
+	if !cfg.Security.MetaInspection.Enabled {
+		logger.Warn("Meta inspection (params._meta) is DISABLED - unknown _meta keys will pass through unstripped. Set security.meta_inspection.enabled=true to enable.")
+	}
+	if cfg.Security.MetaInspection.Enabled && cfg.Security.MetaInspection.RejectUnknown {
+		logger.Warn("Meta inspection REJECT mode is ON - requests with unknown params._meta keys will be blocked with 403. Set security.meta_inspection.reject_unknown=false to strip instead.")
+	}
 
 	// Initialize encryption manager
 	encryptionManager, err := crypto.NewEncryptionManager(cfg.Security.Encryption, logger)
