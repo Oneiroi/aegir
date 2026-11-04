@@ -58,7 +58,7 @@ API_KEY              ?=
 RECYCLE_AFTER        ?= 25
 AEGIR_ADMIN_PASSWORD ?= admin123
 OMLX_API_KEY         ?= omlx
-JUDGE_MODEL          ?= Qwen3.6-27B-Claude-Opus-Reasoning-Distill-v2-abliterated-OptiQ-3.7bpw-mlx
+JUDGE_MODEL          ?= Qwen3.8-27B-Uncensored-MLX
 LLM_REDTEAM_DIR      := $(shell pwd)/../llm-redteam
 
 # Build the MCP echo server (benign upstream for red-team testing)
@@ -69,13 +69,13 @@ build-echo:
 echo-server: build-echo
 	./bin/echo-server
 
-# Serve an abliterated local judge model via oMLX on :8000 (OpenAI-compatible).
-# The judge must parse hostile payloads without refusing — hence abliterated.
+# Serve an uncensored local judge model via oMLX on :8000 (OpenAI-compatible).
+# The judge must parse hostile payloads without refusing — hence uncensored.
 # Override: make judge-omlx-serve JUDGE_MODEL=your-model
 judge-omlx-serve:
 	omlx serve $(JUDGE_MODEL) --port 8000 --api-key omlx
 
-# Run Aegir with the abliterated Qwen judge served via oMLX.
+# Run Aegir with the uncensored Qwen judge served via oMLX.
 # oMLX must already be running (see judge-omlx-serve). HTTP mode so the
 # SPIKEE/replay target (http://localhost:8443) can drive it.
 run-judge-omlx-qwen: build certs

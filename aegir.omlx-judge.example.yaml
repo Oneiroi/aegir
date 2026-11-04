@@ -1,31 +1,32 @@
 # Aegir — local LLM judge via oMLX (Apple Silicon MLX) example configuration
 #
-# Runs an ABLITERATED local reasoning model as Aegir's LLM judge. The judge is
+# Runs an UNCENSORED (refusal-removed) local reasoning model as Aegir's LLM judge. The judge is
 # invoked only on SUSPICIOUS-flagged traffic (sanitizer/anomaly output); its job
 # is to READ the adversarial payload and classify it BLOCK / SUSPICIOUS / ALLOW.
 #
-# WHY ABLITERATED (this is deliberate, not a shortcut):
+# WHY UNCENSORED (this is deliberate, not a shortcut):
 #   A defensive classifier must parse hostile content — jailbreaks, exfiltration
 #   prompts, harmful instructions — and return a verdict on it. A safety-aligned
-#   model will often REFUSE to engage with such a payload. Aegir treats a judge
-#   refusal or timeout as fail-closed → BLOCK (see AGENTS.md hard constraints),
-#   so a refusing judge gives no discriminating signal: it blocks the benign and
-#   the malicious alike and craters precision. An abliterated (refusal-removed)
-#   model reliably analyses and labels the content instead of declining, which is
-#   exactly what an inspection/judge role needs. It is never generating on behalf
-#   of a user — only classifying quarantined input for the firewall.
+#   model will often REFUSE to engage with such a payload. By default Aegir treats
+#   a judge refusal or timeout as fail-closed → BLOCK (see AGENTS.md hard
+#   constraints), so a refusing judge gives no discriminating signal: it blocks
+#   the benign and the malicious alike and craters precision. An uncensored /
+#   abliterated (refusal-removed) model reliably analyses and labels the content
+#   instead of declining, which is exactly what an inspection/judge role needs.
+#   It is never generating on behalf of a user — only classifying quarantined
+#   input for the firewall.
 #
 # Prerequisites (oMLX is already installed at /opt/homebrew/bin/omlx):
-#   omlx serve Qwen3.6-27B-Claude-Opus-Reasoning-Distill-v2-abliterated-OptiQ-3.7bpw-mlx --port 8000
+#   omlx serve Qwen3.8-27B-Uncensored-MLX --port 8000
 #   # (or: just judge-omlx-serve)
 #
 # Then run Aegir against this config:
 #   MCP_SERVER_TLS_ENABLED=false ./bin/aegir --config aegir.omlx-judge.example.yaml
 #   # (or: just run-judge-omlx-qwen)
 #
-# Alternative abliterated local judges (swap judge.model, keep provider/base_url):
-#   Qwen3.6-27B-Claude-Opus-Reasoning-Distill-v2-abliterated-OptiQ-3.7bpw-mlx   (~14 GB, primary)
-#   Ornith-1.0-9B-8bit-abliterated                                             (~15 GB, faster, lower recall)
+# Alternative uncensored local judges (swap judge.model, keep provider/base_url):
+#   Qwen3.8-27B-Uncensored-MLX   (primary)
+#   Ornith-1.0-9B-8bit-abliterated                                             (faster, lower recall)
 #   any OpenAI-compatible MLX endpoint on :8000/v1
 
 environment: development
@@ -69,10 +70,13 @@ judge:
   enabled: true
   provider: openai          # oMLX exposes an OpenAI-compatible /v1 API
   base_url: http://localhost:8000/v1
-  model: Qwen3.6-27B-Claude-Opus-Reasoning-Distill-v2-abliterated-OptiQ-3.7bpw-mlx
+  model: Qwen3.8-27B-Uncensored-MLX
   api_key: "omlx"           # oMLX currently requires a bearer token; the value is literally "omlx"
   timeout_ms: 15000         # local 27B reasoning pass; fail-closed → BLOCK on timeout
   expose_reasoning: false   # keep judge reasoning server-side (GDPR/PCI: never echo payload)
+  fail_open: false          # default fail-closed: judge timeout/error/refusal → BLOCK.
+                            # Set true to ALLOW un-verdicted traffic instead (availability
+                            # over protection) — logs a loud startup WARNING.
 
   # Optional ordered failover on TRANSPORT error of the primary (never on a
   # verdict or refusal). Point at a lighter local model so a judge crash does

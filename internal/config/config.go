@@ -52,6 +52,13 @@ type JudgeConfig struct {
 	// HIPAA/PCI) violation when that payload contains regulated data. Enabling
 	// this logs a loud startup WARNING. Use only in trusted debug environments.
 	ExposeReasoning bool `json:"expose_reasoning" mapstructure:"expose_reasoning"`
+
+	// FailOpen, when true, converts judge non-verdict outcomes — timeout,
+	// backend error, malformed response, or model refusal — into ALLOW instead
+	// of the default fail-closed BLOCK. DEFAULT FALSE (fail-closed). Enabling
+	// logs a loud startup WARNING: traffic the judge cannot or will not verdict
+	// passes through unjudged, so the judge layer provides no protection for it.
+	FailOpen bool `json:"fail_open" mapstructure:"fail_open"`
 }
 
 // JudgeFallback is one ordered failover backend for the judge (M013, ISC-141).
@@ -895,6 +902,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("judge.base_url", "http://localhost:11434")
 	v.SetDefault("judge.model", "llama3")
 	v.SetDefault("judge.timeout_ms", 5000)
+	v.SetDefault("judge.fail_open", false)
 
 	v.SetDefault("upstream.services", []map[string]interface{}{
 		{

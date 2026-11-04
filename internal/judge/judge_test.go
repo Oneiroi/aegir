@@ -383,7 +383,7 @@ func TestParseVerdict(t *testing.T) {
 		{"block", BLOCK},
 	}
 	for _, tc := range cases {
-		got := parseVerdict(tc.response, "test").Verdict
+		got := parseVerdict(tc.response, "test", false).Verdict // fail-closed (default)
 		if got != tc.want {
 			t.Errorf("parseVerdict(%q): got %s, want %s", tc.response, got, tc.want)
 		}

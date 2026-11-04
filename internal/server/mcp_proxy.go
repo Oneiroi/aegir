@@ -648,16 +648,27 @@ func (p *MCPProxy) HandleMCPRequest(c *gin.Context) {
 		judgeVerdict := sanitizerVerdictToJudge(sanitizationResult)
 		judgeResult, err := p.ruleEngine.Route(c.Request.Context(), judgeVerdict, string(judgePayload))
 		if err != nil {
-			// AEGIR-L-003: internal judge/backend error detail stays server-side.
-			p.logger.Error("Judge routing error", "error", err)
-			c.JSON(http.StatusForbidden, MCPResponse{
-				Error: &MCPError{
-					Code:    -32000,
-					Message: "Security analysis failed",
-				},
-				ID: req.ID,
-			})
-			return
+			if p.config.Judge.FailOpen {
+				// Explicit fail-open (judge.fail_open): the judge could not render
+				// a verdict (timeout/backend error/refusal). Allow the request to
+				// proceed rather than blocking; judgeResult carries the ALLOW
+				// verdict set by the fail-open path and the switch below forwards.
+				p.logger.Warn("Judge routing error — fail-open configured, allowing request",
+					"error", err,
+					"verdict", judgeResult.Verdict)
+			} else {
+				// Fail-closed (default). AEGIR-L-003: internal judge/backend error
+				// detail stays server-side.
+				p.logger.Error("Judge routing error", "error", err)
+				c.JSON(http.StatusForbidden, MCPResponse{
+					Error: &MCPError{
+						Code:    -32000,
+						Message: "Security analysis failed",
+					},
+					ID: req.ID,
+				})
+				return
+			}
 		}
 
 		switch judgeResult.Verdict {

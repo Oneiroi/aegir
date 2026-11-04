@@ -77,7 +77,7 @@ func TestJudgeRefusal_ImplicitBlock(t *testing.T) {
 		"As an AI language model, I am unable to comply.",
 	}
 	for _, refusal := range refusals {
-		res := parseVerdict(refusal, "test")
+		res := parseVerdict(refusal, "test", false) // fail-closed (default)
 		if res.Verdict != BLOCK {
 			t.Errorf("ISC-37.1: refusal %q must be BLOCK, got %s", refusal, res.Verdict)
 		}

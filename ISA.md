@@ -5,10 +5,10 @@ project: Aegir
 effort: E4
 effort_source: classifier
 phase: execute
-progress: 178/180
+progress: 178/197
 mode: interactive
 started: 2026-05-13T21:00:00Z
-updated: 2026-08-31T00:00:00Z
+updated: 2026-10-06T19:30:00Z
 ---
 
 > **M015 UPDATE (2026-07-14, superseded same day — now fully committed + tagged).** M015 (MCP
@@ -501,6 +501,28 @@ Source: Aegir as the reference defensive architecture for OWASP Top 10 for LLM A
 - [x] ISC-179: [M016] LLMVault referenced in README as recommended attack-learning platform; Aegir positioned as reference defensive architecture — probe: grep -q 'LLMVault' README.md — **DONE 2026-07-16** (README updated; "Learning & validation" section added with LLMVault link and positioning statement)
 - [x] ISC-180: [M016] Defensive mapping guide created: `docs/LLMVAULT-DEFENSIVE-MAPPING.md` maps each OWASP LLM Top 10 category (LLM01–LLM10) to owning Aegir ISCs, config examples, and probe tests — probe: file exists with all 10 categories documented (LLM08/LLM09 honestly marked out-of-scope) — **DONE 2026-07-16** (`docs/LLMVAULT-DEFENSIVE-MAPPING.md` created with full category-by-category defensive mapping, deployment checklist, config examples for each category; LLM08 (embeddings) and LLM09 (misinformation) marked explicitly out-of-scope with rationale)
 
+### M017 — System-1 Decision-Model Judge Tier
+
+Source: `docs/M017-IMPLEMENTATION-PLAN.md` (2026-10-06). A fast System One decision-model classifier (Kev/Laya class, hosted Jev opt-in only) fronts the LLM judge as a triage tier: calibrated malicious-confidence drives a three-way decision — outright BLOCK at certainty (≥ `block_confidence`, default 0.95, no System-2 call), escalation to the existing judge at/above a configurable severity threshold (default `critical`), ALLOW fast path below it. Classifier error/timeout/uncertainty escalates (fail-closed overall). Runs only on already-SUSPICIOUS traffic; dormant by default.
+
+- [ ] ISC-181: [M017] `internal/system1` package exists with a defined `Classifier` interface (`Classify(ctx, payload) (Classification, error)`) — probe: `ls internal/system1/*.go` returns files; compile-time interface assertion test exits 0
+- [ ] ISC-182: [M017] Classifier client speaks the spike-verified System One wire shape (`POST /v1/systemone`) via stdlib `net/http` and parses a per-label calibrated probability in [0,1] — probe: `go test -run TestSystem1Classify ./internal/system1/` against `httptest` mock exits 0 (malformed/absent probability → error, never a fabricated score)
+- [ ] ISC-183: [M017] Malicious confidence ≥ `block_confidence` (default 0.95) produces immediate BLOCK with **no System-2 judge invocation** — probe: `go test -run TestSystem1BlockShortcutSkipsJudge` asserts mock judge received zero calls
+- [ ] ISC-184: [M017] Malicious confidence in the escalation band (≥ `escalation_threshold`, default `critical`; below `block_confidence`) escalates to the System-2 judge, whose verdict governs — probe: `go test -run TestSystem1EscalatesAtThreshold` asserts judge mock called exactly once and its verdict is the one returned
+- [ ] ISC-185: [M017] Malicious confidence below the escalation band produces ALLOW fast path (judge not invoked) and an audit-log entry — probe: `go test -run TestSystem1FastPathAllow` asserts zero judge calls + `system1_classify` audit event present
+- [ ] ISC-186: [M017] Classifier error/timeout → escalates to System-2 when `escalation_enabled` (default); with escalation disabled, follows the judge fail policy (`failVerdict`: BLOCK default, ALLOW only under explicit `judge.fail_open`) — probe: `go test -run TestSystem1FailureEscalates` + `TestSystem1FailureNoEscalationFailClosed`
+- [ ] ISC-187: [M017] Uncertain classification (label confidence < `min_confidence`, default 0.60, in either direction) escalates; with escalation disabled it BLOCKs — never silently allows — probe: `go test -run TestSystem1UncertainEscalates`
+- [ ] ISC-188: [M017] Thresholds configurable: `judge.system1.escalation_threshold` (severity band name, default `critical`), `block_confidence` (default 0.95), `min_confidence` (default 0.60), `severity_bands` boundaries; invalid band names or `block_confidence` below the escalation-band floor rejected at config load — probe: `go test -run TestSystem1ConfigDefaults` + `TestSystem1ConfigValidation` (`internal/config`)
+- [ ] ISC-189: [M017] `judge.system1.escalation_enabled` (default true) toggles the escalation path; when false the System-1 decision is final (ALLOW/BLOCK/uncertain→BLOCK) — probe: `go test -run TestSystem1EscalationDisabled`
+- [ ] ISC-190: [M017] System-1 is invoked only on the SUSPICIOUS path; the non-judge path p99 <10ms gate is unchanged — probe: `go test -run TestNonJudgePathLatency` green with system1 enabled, plus dormancy probe `TestSystem1NotInvokedOnCleanTraffic`
+- [ ] ISC-191: [M017] Every classification emits an HMAC-protected audit event with payload hash, confidence, band, action taken, latency, model — probe: `go test -run TestSystem1AuditEvent` asserts all six fields + log-chain integrity check exits 0
+- [ ] ISC-192: [M017] Client isolation: classifier label/confidence/reasoning never appear in the response body or headers (canary probe, extends ISC-33) — probe: `go test -run TestSystem1ReasonNeverLeaksToClient`
+- [ ] ISC-193: [M017] Local-first: default provider is a local endpoint (Kev/Laya); hosted Jev requires explicit `provider: jev` + `api_key` opt-in — probe: default config `base_url` is localhost; `go test -run TestSystem1LocalFirstDefault`
+- [ ] ISC-194: [M017] Evaluation harness replays the repo red-team corpus + benign controls through System-1 and reports precision/recall/calibration per severity band at `docs/M017-EVAL-REPORT.md`; shipped threshold defaults are confirmed or adjusted from that data (never from vendor benchmarks) — probe: report file exists with per-band metrics; harness script exits 0
+- [ ] ISC-195: [M017] Perf: classifier adds <250ms p95 on the judged path against an instant mock backend, and the end-to-end SUSPICIOUS-path p95 <2s gate (ISC-41) stays green — probe: `go test -run TestSystem1PerformanceGate ./internal/system1/` + `TestJudgePerformanceGate` green
+- [ ] ISC-196: [M017] Anti: with `judge.system1.enabled` false (the default), SUSPICIOUS-path behavior is identical to pre-M017 (classifier never constructed, judge invoked exactly as before) — probe: `go test -run TestSystem1DormantByDefault`
+- [ ] ISC-197: [M017] Anti: no new Go module dependencies introduced — probe: `git diff HEAD~<m017-base> -- go.mod go.sum` empty of added require lines
+
 ## Test Strategy
 
 ```yaml
@@ -821,6 +843,108 @@ Source: Aegir as the reference defensive architecture for OWASP Top 10 for LLM A
   check: SSE CORS does not reflect an unlisted request Origin
   threshold: unlisted Origin receives no reflecting ACAO header
   tool: go test -run TestSSECORSStrictAllowlist
+
+- isc: ISC-181
+  type: unit
+  check: internal/system1 package exposes Classifier interface
+  threshold: exit 0
+  tool: go test -run TestSystem1ClassifierInterface ./internal/system1/
+
+- isc: ISC-182
+  type: unit
+  check: /v1/systemone client parses calibrated per-label probability; malformed response errors
+  threshold: exit 0
+  tool: go test -run TestSystem1Classify ./internal/system1/
+
+- isc: ISC-183
+  type: unit
+  check: confidence >= block_confidence (0.95) blocks without invoking System-2 judge
+  threshold: exit 0, mock judge call count == 0
+  tool: go test -run TestSystem1BlockShortcutSkipsJudge
+
+- isc: ISC-184
+  type: unit
+  check: escalation band (default critical) invokes System-2 judge exactly once; judge verdict governs
+  threshold: exit 0
+  tool: go test -run TestSystem1EscalatesAtThreshold
+
+- isc: ISC-185
+  type: unit
+  check: below-threshold confidence allows fast path with audit event, no judge call
+  threshold: exit 0
+  tool: go test -run TestSystem1FastPathAllow
+
+- isc: ISC-186
+  type: unit
+  check: classifier error/timeout escalates (escalation on) or fails closed per failVerdict (escalation off)
+  threshold: exit 0
+  tool: go test -run 'TestSystem1FailureEscalates|TestSystem1FailureNoEscalationFailClosed'
+
+- isc: ISC-187
+  type: unit
+  check: uncertain classification (< min_confidence) escalates; blocks when escalation disabled
+  threshold: exit 0
+  tool: go test -run TestSystem1UncertainEscalates
+
+- isc: ISC-188
+  type: unit
+  check: system1 config defaults (critical threshold, 0.95 block, 0.60 min) and validation of bands/bounds
+  threshold: exit 0
+  tool: go test -run 'TestSystem1ConfigDefaults|TestSystem1ConfigValidation' ./internal/config/
+
+- isc: ISC-189
+  type: unit
+  check: escalation_enabled=false makes System-1 decision final
+  threshold: exit 0
+  tool: go test -run TestSystem1EscalationDisabled
+
+- isc: ISC-190
+  type: integration
+  check: non-judge path p99 <10ms with system1 enabled; classifier never invoked on clean traffic
+  threshold: exit 0
+  tool: go test -run 'TestNonJudgePathLatency|TestSystem1NotInvokedOnCleanTraffic' ./internal/server/
+
+- isc: ISC-191
+  type: unit
+  check: audit event carries hash, confidence, band, action, latency, model; HMAC chain intact
+  threshold: exit 0
+  tool: go test -run TestSystem1AuditEvent
+
+- isc: ISC-192
+  type: integration
+  check: classifier canary label/confidence absent from client response body and headers
+  threshold: exit 0
+  tool: go test -run TestSystem1ReasonNeverLeaksToClient ./internal/server/
+
+- isc: ISC-193
+  type: unit
+  check: default provider is local; hosted jev requires explicit opt-in
+  threshold: exit 0
+  tool: go test -run TestSystem1LocalFirstDefault ./internal/config/
+
+- isc: ISC-194
+  type: integration
+  check: eval harness over red-team corpus + benign controls reports per-band precision/recall/calibration
+  threshold: docs/M017-EVAL-REPORT.md exists with per-band metrics; harness exits 0
+  tool: ls docs/M017-EVAL-REPORT.md
+
+- isc: ISC-195
+  type: perf
+  check: classifier p95 <250ms (mock backend); SUSPICIOUS path p95 <2s gate preserved
+  threshold: exit 0
+  tool: go test -run 'TestSystem1PerformanceGate|TestJudgePerformanceGate' ./...
+
+- isc: ISC-196
+  type: anti
+  check: system1 disabled (default) leaves SUSPICIOUS-path behavior identical to pre-M017
+  threshold: exit 0
+  tool: go test -run TestSystem1DormantByDefault ./internal/server/
+
+- isc: ISC-197
+  type: anti
+  check: M017 introduces no new Go module dependencies
+  threshold: no added require lines
+  tool: git diff -- go.mod go.sum
 ```
 
 ## Features
@@ -889,6 +1013,12 @@ Source: Aegir as the reference defensive architecture for OWASP Top 10 for LLM A
 | m015-app-content-hardening | `sanitizeXSS` broadened (svg/unclosed-script/data-URI/base64); `SanitizeAppContent` as a distinct stricter content class | ISC-173, ISC-174 | none | true | Sonnet — DONE, committed `d3539e3` |
 | m015-spec-transition | Replay cache re-anchored on identity + actually wired; OAuth 2.1 PKCE (S256) mandatory on login+callback | ISC-177, ISC-178 | none | false | Sonnet — DONE, committed `d3539e3` |
 | m015-state-verification | `internal/statesign` HMAC-signed task tokens; new `tasks/status` method enforces identity isolation on resume | ISC-175, ISC-176 | m015-async-task-quota | false | Sonnet — DONE, committed `d3539e3` |
+| m017-system1-core | `internal/system1` package: Classifier interface, stdlib `/v1/systemone` client, calibrated-confidence parsing, band mapping, pure Decide() | ISC-181, ISC-182 | M017.0 spike GO | false | pi (Qwen3.8-27B-4bit, supervised — solo package, worktree) |
+| m017-config | `judge.system1` config section: defaults, env bindings, band/threshold validation, example YAML | ISC-188, ISC-193 | m017-system1-core | false | pi (serial — shared `internal/config/config.go`) |
+| m017-decision-wiring | RuleEngine optional System-1 stage: block shortcut / escalate / fast-path allow / failure+uncertainty escalation; server construction; dormant-by-default | ISC-183, ISC-184, ISC-185, ISC-186, ISC-187, ISC-189, ISC-190, ISC-196 | m017-config | false | pi implements, supervisor verifies call site (red-reachable wiring probe) |
+| m017-audit-isolation | HMAC audit events per classification; client-isolation canary probe | ISC-191, ISC-192 | m017-decision-wiring | false | pi |
+| m017-eval-harness | Red-team corpus replay harness + `docs/M017-EVAL-REPORT.md`; thresholds tuned from measured data | ISC-194 | m017-decision-wiring | false | pi + supervisor review |
+| m017-perf-reconcile | Perf gates (classifier p95 <250ms mock; ISC-41 gate preserved); README/SCOPE note; ISA Verification entries | ISC-195, ISC-197 | m017-audit-isolation, m017-eval-harness | false | pi; supervisor closes milestone |
 
 ## Decisions
 
@@ -955,6 +1085,12 @@ Source: Aegir as the reference defensive architecture for OWASP Top 10 for LLM A
 
 - 2026-08-31: **rt-20260816 red-team remediation CLOSED — bundles 1–6 committed `ff8ce41`→`395dae4`, root gate green on committed HEAD (20/20 packages, no FAIL).** Chain of record: `redteam/aegir/results/rt-20260816/` findings → KIMI-REVIEW → ADJUDICATION (§F folded in). Process, per David's locked roles: Kimi (supervisor) reviews/directs only — never writes code; pi (Qwen3.8-27B-4bit via omlx :8000, session `7ec48760`) does ALL discovery and implementation, dispatched as background tasks with completion-notification waits; David runs every commit/push/destructive action. Per bundle: **1+2** (`ff8ce41`) F1/F2/N1/F8+F3 — upstream trust exemption (host:port match, per-connect audit log) + fail-closed 502, forward-path SSRF-arg scan + shared approval gate, `isSSRFTarget` hardening (prose scan, empty-authority fail-closed, zone handling, internal-suffix DNS denylist). **3** (`f34c5e6`) F4b/d/e+N5/B1/B2 — session-ID rotation degrade-to-shared-key (20 distinct/5min, never blocks), bounded fragment accumulation (cap 0.3, ≥2 messages, 5-min window), high-band keep-the-block on sanitizer `Blocked` verdicts, all in-band `X-Aegir-Risk`/`X-Aegir-Threat-Score` egress headers stripped. **4** (`b071a04`) F5 — `detection.FoldConfusables` (Cyrillic lookalikes case-paired per confusables.txt, fullwidth, math bold/bold-italic; stdlib O(n)) folded into the sanitizer working copy and the session analyzer ahead of all matching; severity-aware risk/judge alignment so low-only results (e.g. benign fullwidth) keep Risk low and never reach the judge. **5** (`c3978db`) F6/N2/N3 — single `compliance.enabled` master (explicit-false opt-out via post-ReadInConfig viper default injection) + startup WARN; `compliance.request_policy` per-class actions (critical→block floor, high→redact, medium/low→log-only); request scan moved post-sanitizer with `Sanitized` write-back (unmarshal failure → 403 fail-closed); response redact now actually masks compliance-class PII; Luhn gate on PAN patterns (valid→critical unchanged, invalid→low `pan_unvalidated` log-only); dead `piiPatterns/phiPatterns/pciPatterns` deleted; card counted under PCI only. **6** (`395dae4`) F7/F9/N4+hygiene — `security.meta_inspection` config (enabled/allowed_keys/reject_unknown) with spec keys `progressToken`/`requestState` added to the default allowlist; dead `LoadLegacy` env loader deleted (env config survives only via explicit `MCP_*` bindings; `.env.example` swept); justfile `--config` fix (inert `MCP_UPSTREAM_URL` dropped); `x-session-id` + `referer` added to the header-scan skip list (never forwarded upstream), `sanitizeSessionID` clamp 128→512; status-code contract documented in README + regression-pinned; flake fixes — `TestTransportModeSelection` build-once + poll-with-deadline, `TestNonJudgePathLatency` min-p99-of-5 (see Changelog). Plus `1094e02` (bundle 1–3 probe tests left untracked by their commits — swept). Behavioral notes for operators: 3× SSN request now redacts-forwards (was aggregation-block 403) per the approved per-class matrix; low-severity-only sanitizer results no longer route to the judge (fail-closed judge outage previously would have blocked benign confusable text); env-based config outside the explicit `MCP_*` set is gone with `LoadLegacy`.
   **Follow-up candidates banked (not ISCs, David's scope call):** pinned-IP upstream-trust mode (F1 v2 — v1 is host:port string match, no resolved-IP re-check); session-creation-threshold config knob (F4b's 20-distinct/5-min limits are compile-time constants); POLY.007 zero-width/format-char handling on the regex-matching path; pre-existing benign-Russian-prose block via mixed-script IOCs (LLM.ML.002/.004 fire on folded ASCII+Cyrillic mixes — predates bundle 4); `password` secret regex trailing-quote quirk (can corrupt JSON on unquoted values); Greek lookalike fold tier (deferred from F5 — no vector in corpus); `ssn` bare `\d{9}` arm FP class; `TestDetectionThroughput` wall-clock contention exposure (same class as the fixed latency flake — apply min-over-batches if it ever flakes); `detectHomoglyphs` removal (inert since bundle 4, kept for the `HomoglyphFilter` config surface).
+
+- 2026-09-02: **LLMVault efficacy re-measured on post-red-team HEAD `0acf5fc` — the defence demonstration is now valid on current code.** The 2026-07-18 clean numbers (62.13% block / 13.33% benign-FP) predate F1 (hollow-proxy fallback — every prior run measured the fabricated 200 path, not proxying) and bundles 1–6 (detection behaviour changed), so they could not stand as a demonstration of the current build. Fresh full-corpus replay (2,720 adversarial + 15 benign; `redteam/aegir/results/efficacy-20260902/` — git-ignored per locked decision): **adversarial block rate 88.60% (2410/2720)**, benign FP **13.33% (2/15, identical FPs `benign-003`/`benign-012` as July — no pattern-layer regression)**, latency p99 17.78 ms adversarial / 15.54 ms benign **on the real forward path** (F1 verified end-to-end: first request round-trips `echo:` from the live upstream). Layer attribution from the HMAC decision log: ~80% session-analyzer, ~20% pattern. Two measurement-validity findings, documented in the report: (1) the SPIKEE target mints a fresh ephemeral `X-Session-ID` per single-turn payload, so F4b rotation-degrade (21 distinct SIDs/5 min → shared identity key) engages ~20 payloads in — the 88.60% is a **campaign-level** number (per-payload detection + session escalation against a rotating-SID identity), not like-for-like with July's per-payload 62.13%; (2) a benign run fired immediately after the adversarial campaign scored 100% session-layer blocks (hot shared-key EWMA — the July latch class re-expressed at identity level) and **13.33% after `DELETE /api/security/sessions`** — harness rule: reset state between adversarial and benign phases. Residual 11.4% miss concentrates in LLM07 sysmsg-extract (137) + LLM01 long-output (47) — the judge layer's documented territory, measured here with the judge off. Follow-ups banked: judge-enabled re-run (omlx `Qwen3.8-27B-4bit` on :8000 is available); per-payload clean measurement via ≤20-payload batches with process restarts (the rotation tracker is in-process and not cleared by the state-reset endpoint); `replay.py` auto-reset before the benign phase. No code changes this pass — measurement + report only; nothing committed (David's GPG gate).
+
+- 2026-10-06: **M017 scaffolded — System-1 decision-model judge tier (ISC-181–197), plan at `docs/M017-IMPLEMENTATION-PLAN.md`.** Driver: judge calls are synchronous seconds-class on every SUSPICIOUS request; a sub-100ms System One decision model (Kev default / Laya alternate, both Apache-2.0 local; hosted Jev explicit opt-in only) triages calibrated malicious-confidence into outright BLOCK (≥0.95, no System-2 call), escalate-to-judge (configurable band, default `critical`), or fast-path ALLOW. Design decisions recorded: (1) classifier sits inside the existing judge escalation path (`judge.RuleEngine`, optional stage, nil = dormant) rather than as a new request-path layer, so the 10ms p99 non-judge gate (ISC-91) is structurally untouched and `system1.enabled: false` is byte-identical to pre-M017; (2) classifier error/timeout/uncertainty always escalates when escalation is enabled, and fails closed per `failVerdict` when it isn't — the System-1 tier can never silently allow on its own failure; (3) no threshold ships on vendor benchmarks — independent coverage (Cosmonet 2026-09-21, LangWatch 2026-09-22) shows the Jev/Kev/Laya numbers mix fine-tuned and unverified provenance, so ISC-194 requires measured precision/recall on this repo's own red-team corpus before defaults are confirmed; (4) M017.0 is a falsifying spike (serve Kev-0.8B locally, verify `/v1/systemone` wire shape + calibrated probabilities + latency) before any package is written — NO-GO aborts the milestone with zero sunk code. Execution model: pi (`Qwen3.8-27B-4bit`, per the locked 2026-08-26 dispatch pattern) under the PREFERENCES routing rules (480s hard timeout, grade-artifact-on-timeout, no git/destructive actions, fingerprint grep before trust, two-failure deferral), supervisor reviews call sites, David commits. Precondition flagged: the uncommitted `judge.fail_open` working-tree work must be committed or stashed by David first; M017 builds on committed HEAD only. Open questions for David recorded in the plan (default `critical` escalation band pending M017.4 data; hosted-Jev opt-in scope). Progress 178/180 → 178/197.
+
+- 2026-10-07: **refined: M017 System-1 model sizing revised for the actual hardware (M5 Max, 128GB).** The scaffold's Kev-0.8B default was sized for generic "Mac-class" hardware; this box co-loads Kev-27B-4bit (~15GB) alongside the Qwen3.8-27B-4bit judge (~16GB) with ~95GB to spare, and System-1 calls are prefill-only single forward passes, so latency — not memory — is the binding constraint. The pinned size is replaced with a selection rule: M017.0 benchmarks the full Kev ladder (0.8B/4B/9B/27B, 4-bit, judge co-resident) + Laya fallback, and ships the largest checkpoint with p95 ≤ 250ms (ISC-195 budget) as the default; `kev-9b` is the config placeholder until measured. Accuracy motivates the move: the one independent injection suite scored Kev-0.8B at 53.9% (weakest measured) — the family's near-Jev parity claim belongs to the 27B checkpoint. No ISC text changes (ISC-182/193/195 are size-agnostic by design); plan doc `docs/M017-IMPLEMENTATION-PLAN.md` updated.
 
 ## Changelog
 

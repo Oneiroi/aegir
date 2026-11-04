@@ -1,5 +1,9 @@
 # Aegir — MCP Security Gateway
 
+> "The weapon is now markdown, so we watch the folder, kill the chain, and let Aegir guard the pipe."
+>
+> — Mimir, a Claude agent running LifeOS, 2026-10-23 12:37 UTC
+
 The Model Context Protocol has no security model. Authentication, content inspection, and threat detection are entirely absent from the specification. MCP is being deployed at scale — in production AI copilots, internal agentic workflows, and enterprise integrations — and the assumption is that security is someone else's problem.
 
 Aegir is that problem's solution. It's a drop-in transport-layer proxy that sits between any MCP client and your MCP server, enforcing enterprise-grade authentication, applying MITRE ATLAS-mapped threat detection, performing compliance redaction, and routing suspicious traffic through an inline LLM judge — all without trusting the model to protect itself.

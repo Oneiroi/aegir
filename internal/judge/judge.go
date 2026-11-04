@@ -1,7 +1,9 @@
 // Package judge provides LLM-based content analysis for the Aegir MCP Security Gateway.
 // It implements the Judge interface backed by either a local Ollama instance or an external API.
 //
-// Fail-closed contract: any error, timeout, or refusal results in BLOCK — never ALLOW.
+// Fail-closed contract: any error, timeout, or refusal results in BLOCK — never
+// ALLOW. The operator may opt into fail-open (Config.FailOpen) for availability
+// over protection on non-verdict outcomes; the default remains fail-closed.
 package judge
 
 import (
@@ -109,6 +111,12 @@ type Config struct {
 	// Fallbacks is an ordered list of backends to try when the primary backend
 	// fails with a TRANSPORT error (ISC-141). Empty means no failover.
 	Fallbacks []FallbackConfig `json:"fallbacks" mapstructure:"fallbacks"`
+
+	// FailOpen, when true, converts non-verdict outcomes (timeout, transport
+	// error, non-2xx status, malformed response, refusal) into ALLOW instead of
+	// the default fail-closed BLOCK. Default false. The server logs a loud
+	// startup WARNING when this is enabled.
+	FailOpen bool `json:"fail_open" mapstructure:"fail_open"`
 }
 
 const (
@@ -155,6 +163,16 @@ func (e *transportError) Unwrap() error  { return e.err }
 func isTransportError(err error) bool {
 	var te *transportError
 	return errors.As(err, &te)
+}
+
+// failVerdict returns the verdict for a non-verdict judge outcome (timeout,
+// backend error, malformed response, refusal): BLOCK by default (fail-closed),
+// ALLOW when the operator has explicitly configured fail-open.
+func failVerdict(failOpen bool) Verdict {
+	if failOpen {
+		return ALLOW
+	}
+	return BLOCK
 }
 
 // RuleEngine wraps a Judge and applies routing logic so that:
@@ -347,6 +365,7 @@ func check(ctx context.Context, payload string, cfg Config, client *http.Client,
 			Model:     fb.Model,
 			APIKey:    fb.APIKey,
 			Provider:  fb.Provider,
+			FailOpen:  cfg.FailOpen,
 		}))
 	}
 
@@ -388,8 +407,9 @@ func checkOnce(ctx context.Context, payload string, cfg Config, client *http.Cli
 	result.PayloadHash = hash
 
 	if err != nil {
-		// Timeout or network failure → BLOCK (ISC-37, ISC-102/103/104).
-		result.Verdict = BLOCK
+		// Timeout or network failure → BLOCK (ISC-37, ISC-102/103/104), or
+		// ALLOW under explicit fail-open (judge.fail_open).
+		result.Verdict = failVerdict(cfg.FailOpen)
 
 		logJudgeEvent(logger, "judge_refused", "CRITICAL", hash, cfg.Model, latency, err.Error())
 		return result, err
@@ -412,8 +432,9 @@ func doRequest(ctx context.Context, payload string, cfg Config, client *http.Cli
 	case ProviderOllama, ProviderOpenAI, "":
 		return doOllamaRequest(ctx, payload, cfg, client)
 	default:
-		// Unknown provider → fail closed, terminal (not a transport error).
-		return CheckResult{Verdict: BLOCK}, fmt.Errorf("judge: unknown provider %q", cfg.Provider)
+		// Unknown provider → fail closed by default, terminal (not a transport
+		// error); ALLOW under explicit fail-open.
+		return CheckResult{Verdict: failVerdict(cfg.FailOpen)}, fmt.Errorf("judge: unknown provider %q", cfg.Provider)
 	}
 }
 
@@ -430,13 +451,13 @@ func doOllamaRequest(ctx context.Context, payload string, cfg Config, client *ht
 	}
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return CheckResult{Verdict: BLOCK}, fmt.Errorf("judge: marshal request: %w", err)
+		return CheckResult{Verdict: failVerdict(cfg.FailOpen)}, fmt.Errorf("judge: marshal request: %w", err)
 	}
 
 	endpoint := cfg.BaseURL + "/v1/chat/completions"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return CheckResult{Verdict: BLOCK}, fmt.Errorf("judge: build request: %w", err)
+		return CheckResult{Verdict: failVerdict(cfg.FailOpen)}, fmt.Errorf("judge: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if cfg.APIKey != "" {
@@ -447,32 +468,34 @@ func doOllamaRequest(ctx context.Context, payload string, cfg Config, client *ht
 	if err != nil {
 		// Connection refused, timeout, DNS failure → TRANSPORT error (ISC-141).
 		// Context deadline exceeded lands here as well (ISC-37).
-		return CheckResult{Verdict: BLOCK}, &transportError{fmt.Errorf("judge: http: %w", err)}
+		return CheckResult{Verdict: failVerdict(cfg.FailOpen)}, &transportError{fmt.Errorf("judge: http: %w", err)}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		// 4xx / 5xx → implicit BLOCK (ISC-102/103/104). This is a verdict-level
 		// outcome, NOT a transport error: it must not trigger failover (ISC-141).
-		return CheckResult{Verdict: BLOCK}, fmt.Errorf("judge: backend returned %d", resp.StatusCode)
+		// Under explicit fail-open the outcome is ALLOW instead.
+		return CheckResult{Verdict: failVerdict(cfg.FailOpen)}, fmt.Errorf("judge: backend returned %d", resp.StatusCode)
 	}
 
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		// A read failure mid-body is a transport-level fault (ISC-141).
-		return CheckResult{Verdict: BLOCK}, &transportError{fmt.Errorf("judge: read response: %w", err)}
+		return CheckResult{Verdict: failVerdict(cfg.FailOpen)}, &transportError{fmt.Errorf("judge: read response: %w", err)}
 	}
 
 	var gen chatCompletionResponse
 	if err := json.Unmarshal(respBytes, &gen); err != nil {
-		// Malformed JSON → parse failure, terminal BLOCK, NOT transport (ISC-141).
-		return CheckResult{Verdict: BLOCK}, fmt.Errorf("judge: unmarshal response: %w", err)
+		// Malformed JSON → parse failure, terminal BLOCK, NOT transport (ISC-141);
+		// ALLOW under explicit fail-open.
+		return CheckResult{Verdict: failVerdict(cfg.FailOpen)}, fmt.Errorf("judge: unmarshal response: %w", err)
 	}
 	if len(gen.Choices) == 0 {
-		return CheckResult{Verdict: BLOCK}, fmt.Errorf("judge: empty choices in response")
+		return CheckResult{Verdict: failVerdict(cfg.FailOpen)}, fmt.Errorf("judge: empty choices in response")
 	}
 
-	return parseVerdict(gen.Choices[0].Message.Content, cfg.Model), nil
+	return parseVerdict(gen.Choices[0].Message.Content, cfg.Model, cfg.FailOpen), nil
 }
 
 // anthropicMessage is one message in the Anthropic Messages request (ISC-140).
@@ -511,13 +534,13 @@ func doAnthropicRequest(ctx context.Context, payload string, cfg Config, client 
 	}
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return CheckResult{Verdict: BLOCK}, fmt.Errorf("judge: marshal anthropic request: %w", err)
+		return CheckResult{Verdict: failVerdict(cfg.FailOpen)}, fmt.Errorf("judge: marshal anthropic request: %w", err)
 	}
 
 	endpoint := cfg.BaseURL + "/v1/messages"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return CheckResult{Verdict: BLOCK}, fmt.Errorf("judge: build anthropic request: %w", err)
+		return CheckResult{Verdict: failVerdict(cfg.FailOpen)}, fmt.Errorf("judge: build anthropic request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-api-key", cfg.APIKey)
@@ -526,24 +549,26 @@ func doAnthropicRequest(ctx context.Context, payload string, cfg Config, client 
 	resp, err := client.Do(req)
 	if err != nil {
 		// Connection refused, timeout, DNS failure → TRANSPORT error (ISC-141).
-		return CheckResult{Verdict: BLOCK}, &transportError{fmt.Errorf("judge: anthropic http: %w", err)}
+		return CheckResult{Verdict: failVerdict(cfg.FailOpen)}, &transportError{fmt.Errorf("judge: anthropic http: %w", err)}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// 4xx / 5xx → implicit BLOCK, terminal (NOT transport) (ISC-141).
-		return CheckResult{Verdict: BLOCK}, fmt.Errorf("judge: anthropic backend returned %d", resp.StatusCode)
+		// 4xx / 5xx → implicit BLOCK, terminal (NOT transport) (ISC-141);
+		// ALLOW under explicit fail-open.
+		return CheckResult{Verdict: failVerdict(cfg.FailOpen)}, fmt.Errorf("judge: anthropic backend returned %d", resp.StatusCode)
 	}
 
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return CheckResult{Verdict: BLOCK}, &transportError{fmt.Errorf("judge: read anthropic response: %w", err)}
+		return CheckResult{Verdict: failVerdict(cfg.FailOpen)}, &transportError{fmt.Errorf("judge: read anthropic response: %w", err)}
 	}
 
 	var ar anthropicResponse
 	if err := json.Unmarshal(respBytes, &ar); err != nil {
-		// Malformed JSON → parse failure, terminal BLOCK, NOT transport (ISC-141).
-		return CheckResult{Verdict: BLOCK}, fmt.Errorf("judge: unmarshal anthropic response: %w", err)
+		// Malformed JSON → parse failure, terminal BLOCK, NOT transport (ISC-141);
+		// ALLOW under explicit fail-open.
+		return CheckResult{Verdict: failVerdict(cfg.FailOpen)}, fmt.Errorf("judge: unmarshal anthropic response: %w", err)
 	}
 
 	// Extract response.content[0].text — first content block of type "text" (ISC-140).
@@ -555,7 +580,7 @@ func doAnthropicRequest(ctx context.Context, payload string, cfg Config, client 
 		}
 	}
 
-	return parseVerdict(text, cfg.Model), nil
+	return parseVerdict(text, cfg.Model, cfg.FailOpen), nil
 }
 
 // buildMessages constructs the OpenAI-compatible messages array for the judge prompt.
@@ -603,7 +628,7 @@ Payload:
 // Any response that does not contain a clear ALLOW verdict — including refusals
 // ("I cannot help with that", "I'm sorry but…") and malformed output — is treated
 // as an implicit BLOCK (ISC-37.1, safe-by-default).
-func parseVerdict(response, model string) CheckResult {
+func parseVerdict(response, model string, failOpen bool) CheckResult {
 	// The judge prompt mandates a response of EXACTLY one verdict token. A
 	// conforming response therefore has a single meaningful line. Requiring the
 	// verdict to be the SOLE content line (after dropping markdown fences and
@@ -619,7 +644,10 @@ func parseVerdict(response, model string) CheckResult {
 		}
 	}
 	// Multi-line, no clear verdict, refusal, or unrecognised → implicit BLOCK
-	// (ISC-37.1, fail-closed).
+	// (ISC-37.1, fail-closed) — or ALLOW under explicit fail-open.
+	if failOpen {
+		return CheckResult{Verdict: ALLOW, Reason: "judge refusal: fail-open allow"}
+	}
 	return CheckResult{Verdict: BLOCK, Reason: "judge refusal: implicit block"}
 }
 

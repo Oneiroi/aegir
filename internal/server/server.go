@@ -67,6 +67,7 @@ func buildJudgeConfig(jc config.JudgeConfig) judge.Config {
 		TimeoutMs: jc.TimeoutMs,
 		Provider:  jc.Provider,
 		Fallbacks: fallbacks,
+		FailOpen:  jc.FailOpen,
 	}
 }
 
@@ -161,6 +162,13 @@ func New(cfg *config.Config) (*MCPFirewall, error) {
 	// known GDPR/HIPAA/PCI violation when that payload contains regulated data.
 	if cfg.Judge.ExposeReasoning {
 		logger.Warn("judge.expose_reasoning is ENABLED — judge reasoning will be emitted to clients (X-Aegir-Judge-Reason header + BLOCK error data). This is KNOWN TO VIOLATE GDPR/HIPAA/PCI when the emitted reasoning contains regulated data being replayed as reasoning. Use only in trusted debug environments.")
+	}
+
+	// Loudly warn when fail-open is configured: traffic the judge cannot or
+	// will not verdict (timeout, backend error, malformed response, refusal)
+	// passes through unjudged instead of being blocked.
+	if cfg.Judge.FailOpen {
+		logger.Warn("judge.fail_open is ENABLED — traffic the judge cannot or will not verdict (timeout, backend error, malformed response, model refusal) will be ALLOWED instead of blocked. The judge layer provides no protection for that traffic. Fail-closed (the default) is strongly recommended for production.")
 	}
 
 	// Initialize MCP proxy
